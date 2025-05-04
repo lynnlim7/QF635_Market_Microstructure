@@ -7,7 +7,7 @@ from datetime import datetime
 import time
 
 # Import your logger setup
-from interfaces.logger import setup_logger
+from bot.interfaces.logger import setup_logger
 
 # Load environment variables
 load_dotenv()

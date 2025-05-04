@@ -4,17 +4,53 @@
 ## 📈 Trading Strategy Implemented in this Project: 
 
 
-## Getting Started ✨
-Steps to run project locally: 
-1. Set up Python environment 
-
+## ✨ Getting Started 
+# Steps to run project locally 
+- Using `pip`
+1. Set up Python virtual environment 
 ```bash
-# Create and activate a virtual environment 
+# Create a virtual environment in the current directory
+python3 -m venv .venv
+
+# Activate the virtual environment
+# On macOS/Linux:
 source .venv/bin/activate
+
+# On Windows (CMD):
+.venv\Scripts\activate
 ```
-2. Install packages from requirements.txt
+
+2. Install project dependencies
 ```bash
 pip install -r requirements.txt
+```
+
+- Using `poetry`
+1. Install poetry using pipx
+```bash
+# Install pipx
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
+
+# Install poetry using pipx 
+pipx install poetry
+```
+
+2. Install project dependencies and activate virtual environment
+```bash
+cd QF635_Market_Microstructure
+poetry install
+poetry shell
+```
+
+3. Run project 
+```bash
+python bot/main.py  # or actual entry point
+```
+
+4. Run tests 
+```bash
+pytest
 ```
 
 

@@ -3,3 +3,9 @@
 
 # Environment
 .env
+
+# Poetry files 
+poetry.lock
+
+# Python bytecode 
+__pycache__/
