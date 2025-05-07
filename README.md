@@ -56,9 +56,11 @@ pytest
 
 
 
-
 # Testing of Functions on Binance Testnet 
 https://www.binance.com/en/support/faq/detail/ab78f9a1b8824cf0a106b4229c76496d 
+
+python-binance documentation
+https://python-binance.readthedocs.io/en/latest/
 
 
 ## License 

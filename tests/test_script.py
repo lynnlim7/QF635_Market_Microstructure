@@ -3,11 +3,10 @@ import os
 from dotenv import load_dotenv
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
-from datetime import datetime
-import time
 
 # Import your logger setup
-from bot.interfaces.logger import setup_logger
+from bot.utils.logger import setup_logger
+from bot.config.settings import BINANCE_API_KEY, BINANCE_API_SECRET
 
 # Load environment variables
 load_dotenv()
@@ -41,9 +40,10 @@ class BinanceAPITester:
         
         # Initialize Binance client
         self.client = Client(
-            os.getenv('BINANCE_API_KEY'),
-            os.getenv('BINANCE_API_SECRET')
+            BINANCE_API_KEY,
+            BINANCE_API_SECRET
         )
+        print(self.client.API_URL)
 
     def test_market_data(self):
         """Test market data logging"""
