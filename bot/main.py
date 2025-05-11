@@ -1,3 +1,5 @@
+from binance import SIDE_BUY, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC
+
 from bot.client.binance_api import BinanceApi
 from bot.pricing.PricingEngine import PricingEngine
 from bot.strategy.vwap_strategy import VWAPStrategy
@@ -7,8 +9,9 @@ import time
 
 def main():
 
-    symbol = "BTCUSDT" # potentially get multiple currency pairs
+    symbol = "BTCUSDT" # TODO: potentially get multiple currency pairs
     api = BinanceApi()
+    # api.get_account()
     strategy = VWAPStrategy(symbol, api)
     engine = PricingEngine(api=api)
 
@@ -20,6 +23,9 @@ def main():
 
         # TODO : change to logger, or can even log it in the strategy
         print(f"Signal: {signal}")
+
+        # TODO: pass signal into the risk manager
+
 
         # I think this depends on the risk appetite of portfolio
         # amount = portfolio.calculate_position_size(signal, price_data)
