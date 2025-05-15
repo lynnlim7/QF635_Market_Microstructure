@@ -6,16 +6,8 @@ from bot.client.binance_api import BinanceApi
 
 class BaseStrategy(ABC):
     @abstractmethod
-    def __init__(self, symbol: str, config: dict = None):
+    def __init__(self, symbol: str,api: BinanceApi, config: dict = None):
         """Initialize the strategy with symbol and config."""
-        pass
-
-    @abstractmethod
-    def on_init(self, api: BinanceApi):
-        """
-        Optional hook to preload initial state before live trading.
-        E.g., compute VWAP on historical candles.
-        """
         pass
 
     @abstractmethod

@@ -34,6 +34,7 @@ python3 -m pipx ensurepath
 
 # Install poetry using pipx 
 pipx install poetry
+poetry self add poetry-plugin-export 
 ```
 
 2. Install project dependencies and activate virtual environment
