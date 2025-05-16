@@ -17,4 +17,6 @@ tests/logs/
 bot/logs/
 logs/
 
+pg_data/
+
 TODO.md
