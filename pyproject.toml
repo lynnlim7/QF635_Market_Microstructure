@@ -116,6 +116,9 @@ wrapt = "1.17.0"
 yarl = "1.20.0"
 polars = "^1.29.0"
 pyarrow = "^20.0.0"
+redis = "^6.1.0"
+pydantic-settings = "^2.9.1"
+loguru = "^0.7.3"
 
 [build-system]
 requires = ["poetry-core"]

@@ -24,7 +24,7 @@ class BinanceApi:
             logger_path="./logs/market",
             level = logging.INFO,
             log_type="market",
-            max_bytes=50*1024*1024
+            max_bytes=50*1024*1024a
         )
 
 
