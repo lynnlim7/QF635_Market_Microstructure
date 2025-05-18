@@ -1,4 +1,3 @@
-import yaml
 from collections import deque
 import redis.asyncio as redis
 import asyncio
@@ -18,7 +17,8 @@ RECONNECT_INTERVAL = 23.5 * 60 * 60
 __all__ = [
     "KlineTask",
     "TradeTask",
-    "SpotDataGateway"
+    "SpotDataGateway",
+    "BookTickerTask"
 ]
 
 
@@ -46,7 +46,7 @@ class TaskBase(TaskABC) :
         self._refresh_tick = t
 
 class KlineTask(TaskBase) :
-    def __init__(self, symbols : List[str], intervals: List[str], refresh_tick=0.2) : 
+    def __init__(self, symbols : List[str], intervals: List[str], refresh_tick:float=0.1) : 
         self._refresh_tick = refresh_tick
         self.symbols = symbols
         self.intervals = intervals
@@ -63,7 +63,7 @@ class KlineTask(TaskBase) :
         return out
 
 class TradeTask(TaskBase) : 
-    def __init__(self, symbols, agg : bool =True, refresh_tick=0.01) :
+    def __init__(self, symbols : List[str], agg : bool =True, refresh_tick:float =0.001) :
         self.refresh_tick = refresh_tick
         self.symbols = symbols
         self.agg = agg
@@ -80,7 +80,20 @@ class TradeTask(TaskBase) :
         
         out = [f"{symbol.lower()}@{chan}" for symbol in self.symbols]
 
-        return out         
+        return out
+
+class BookTickerTask(TaskBase) :
+    def __init__(self, symbols : List[str], refresh_tick:float=0.001) : 
+        self.symbols = symbols
+        self.refresh_tick = refresh_tick
+
+    @property
+    def queue_size(self) -> int :
+        return len(self.symbols) * 10
+
+    def get_subscriptions(self) -> List[str] :
+        out = [f"{symbol.lower()}@bookTicker" for symbol in self.symbols]
+        return out
 
 
 class SpotDataGateway :
@@ -116,6 +129,7 @@ class SpotDataGateway :
                 retry = await asyncio.create_task(self._run_feed(task, idx))
             except Exception as e: 
                 retry = False
+                logging.error(e)
         logging.info("Task exited.")
 
 
@@ -124,12 +138,12 @@ class SpotDataGateway :
         stream = self.ws_url + "/stream?streams=" + "/".join(subscriptions)
         async with websockets.connect(stream) as ws : 
             logging.info(f"gateway connected to binance connecting to streams {task.get_subscriptions()}")
-
+            decoder = msgspec.json.Decoder(RawMultistreamMsg)
             start = time.time()
             while True : 
                 try : 
                     ws_msg = await asyncio.wait_for(ws.recv(decode=False), timeout=120)
-                    msg = msgspec.json.decode(ws_msg, type=RawMultistreamMsg)
+                    msg = decoder.decode(ws_msg)
                     key = f"spot:{msg.stream}"
                     self._q[idx].append((key, bytes(msg.data)))
                 except asyncio.TimeoutError:

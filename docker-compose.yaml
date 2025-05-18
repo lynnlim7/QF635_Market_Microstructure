@@ -10,10 +10,12 @@ services:
       - ./pg_data:/var/lib/postgresql/data
 
   redis:
-    image: redis:latest
+    # image: redis:latest
+    image: valkey/valkey:latest # valkey 
+    # network_mode: "host"
+    cpuset: "3"
     ports:
-    - "6379:6379"
-    network_mode: "host"
+      - 6379:6379
     restart: unless-stopped
 
   portfolio-manager:
@@ -33,5 +35,8 @@ services:
       - .env
     build:
       context: ./app
+    cpuset: "2"
     command: ["python3", "data-gateway.py"]
+    volumes:
+      - ./subscriptions.yaml:/app/subscriptions.yaml
   

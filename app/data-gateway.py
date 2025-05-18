@@ -4,7 +4,7 @@ import os
 import asyncio
 import logging
 
-from libs.datafeeds import KlineTask, TradeTask, SpotDataGateway
+from libs.datafeeds import KlineTask, TradeTask, SpotDataGateway, BookTickerTask
 import sys
 
 
@@ -37,13 +37,20 @@ async def init_spot_gateway(spot_subs, redis_params):
         logging.info("No 'kline' subscription found in 'spot' section.")
 
     if "trade" in spot_subs:
-        symbols = spot_subs["kline"].get("symbols", [])
+        symbols = spot_subs["trade"].get("symbols", [])
         aggtradeTask = TradeTask(symbols, agg=True)
         tradeTask = TradeTask(symbols, agg=False)
         asyncio.create_task(spot_gateway.register_task(aggtradeTask))
         asyncio.create_task(spot_gateway.register_task(tradeTask))
     else:
-        logging.info("No 'kline' subscription found in 'aggTrade' section.")
+        logging.info("No 'trade' subscription found in 'spot' section.")
+
+    if "bookTicker" in spot_subs:
+        symbols = spot_subs["bookTicker"].get("symbols", [])
+        bookTickerTask = BookTickerTask(symbols)
+        asyncio.create_task(spot_gateway.register_task(bookTickerTask))
+    else:
+        logging.info("No 'bookTicker' subscription found in 'spot' section.")
 
 
 async def main():
