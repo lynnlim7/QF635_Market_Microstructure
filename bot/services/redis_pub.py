@@ -2,10 +2,10 @@
 Publish serialized market data from gateway to specified channel for other modules to subscribe
 """
 
-from typing import any
-from loguru import logger
-import threading
+from typing import Any
+import logging
 import redis 
+import time
 import orjson
 from bot.utils.logger import setup_logger
 from bot.utils.config import settings
@@ -28,15 +28,23 @@ class RedisPublisher:
         self.prefix = prefix
         
     def create_channel(self, channel:str) -> str:
-        return f"{self.prefix}: {channel}" if self.prefix else channel
+        return channel
     
     def publish(self, channel:str, data):
         try:
             created_channel = self.create_channel(channel)
-            message = orjson.dumps(data) # serialize data
-            self.redis.publish(created_channel, data)
+            redis_key = f"{self.prefix}:{created_channel}"
+            logging.info(f"Publishing to channel: {self.prefix}:{channel} with data: {data}")
+
+            message = orjson.dumps(data)
+            self.redis.set(redis_key,message)
+            self.redis.publish(redis_key, message)
+
         except Exception as e:
-            logger.error(f"Failed to publish data: {e}")
+            logging.error(f"Failed to publish: {e}")
+
+
+
 
 
 

@@ -12,19 +12,22 @@ def setup_logger(
         max_bytes: int = 10*1024*1024, # 10 mb default
         rotation_int: datetime|str = "midnight", 
         rotate_utc: bool = True, # universal time rotation
-        log_type: str = None
+        log_type: str = None,
+        enable_console: bool = False
 ) -> logging.Logger:
     log_file = logger_name + ".log"
     log_filepath = os.path.join(logger_path, log_file)
+    os.makedirs(logger_path, exist_ok=True)
     formatter = logging.Formatter("%(asctime)s [%(threadName)-12.12s] [%(levelname)-5.5s]  %(message)s") # trade formatter
     logger = logging.getLogger(logger_name)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(level)
 
     # log to console
     if not logger.hasHandlers():
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
+        if enable_console:
+            handler = logging.StreamHandler(sys.stdout)
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
 
         WRITE_LOG = os.environ.get("WRITE_LOG", "TRUE")
         TIMED_LOG = os.environ.get("TIMED_LOG", "TRUE")

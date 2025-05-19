@@ -5,10 +5,7 @@ from numpy.random import get_state
 
 from bot.client.binance_api import BinanceApi
 from bot.strategy.base_strategy import BaseStrategy
-
-
-
-
+from bot.utils.config import settings
 
 class MACDStrategy(BaseStrategy):
     def __init__(self, symbol: str,
@@ -31,7 +28,6 @@ class MACDStrategy(BaseStrategy):
 
         self.initialise_data()
         self.print_state()
-
 
     def initialise_data(self):
         # Fetch the initial close prices and load them into a DataFrame
@@ -97,8 +93,6 @@ class MACDStrategy(BaseStrategy):
         self.data.loc[self.data.index[-1], 'MACD'] = macd
         self.data.loc[self.data.index[-1], 'Signal_Line'] = signal_line
 
-
-
     def generate_signal(self) -> int:
         """
         Generate trading signal based on MACD:
@@ -106,16 +100,16 @@ class MACDStrategy(BaseStrategy):
         - Sell when MACD crosses below the Signal Line
         """
         if self.latest_macd is None or self.latest_signal_line is None:
-            return 0  # Not enough data
+            return settings.SIGNAL_SCORE_HOLD  # Not enough data
 
         # Signal Generation Logic
         if self.latest_macd > self.latest_signal_line and self.last_action != "BUY":
             self.last_action = "BUY"
-            return 1
+            return settings.SIGNAL_SCORE_BUY
 
         elif self.latest_macd < self.latest_signal_line and self.last_action != "SELL":
             self.last_action = "SELL"
-            return -1
+            return settings.SIGNAL_SCORE_SELL
 
         return 0
 

@@ -1,29 +1,41 @@
 from binance.client import Client
-from bot.client.binance_api import BinanceApi
 from bot.portfolio.PortfolioManager import PortfolioManager
 from bot.utils.logger import setup_logger
-
-api = BinanceApi()
-df = api.get_ohlcv(symbol="BTCUSDT", interval=Client.KLINE_INTERVAL_1MINUTE, limit=200)
-print(df)
+from bot.utils.config import settings
+import numpy as np 
+import orjson
+import redis
+import threading
 
  #TODO: explain thought process on take profit/ stop loss - should we sell everything?
 
 class RiskManager:
     def __init__(self, 
+                 candlestick:dict,
                  portfolio_manager:PortfolioManager,
-                 max_risk_per_trade_pct:float = 0.01, 
-                 max_absolute_drawdown:float = 0.10, # 10% equity (adjustable)
-                 max_relative_drawdown:float = 0.05 # 5% daily
+                 max_risk_per_trade_pct:float = settings.MAX_RISK_PER_TRADE_PCT, 
+                 max_absolute_drawdown:float = settings.MAX_ABSOLUTE_DRAWDOWN,
+                 max_relative_drawdown:float = settings.MAX_RELATIVE_DRAWDOWN, 
                  ):
-        self.portfolio_manager = portfolio_manager
+        self.candlestick = None
+        self.initial_value = None
         self.max_risk_per_trade_pct = max_risk_per_trade_pct
         self.max_absolute_drawdown = max_absolute_drawdown
         self.max_relative_drawdown = max_relative_drawdown
-        self.initial_value = None
         self.peak_value = None
+        self.portfolio_manager = portfolio_manager
 
-    def calculate_position_size(self, volatility, capital, stop_loss_price):
+    def process_candlestick(self, data: dict):
+        self.candlestick = data # candlestick data
+    
+    # TODO : fix volatility calculation to deal with series and not float 
+    def calculate_volatility(self):
+        close = self.candlestick['close']
+        daily_return = np.log(close/close.shift(1))
+        volatility = daily_return.rolling(window=50).std() * np.sqrt(252)
+        return volatility
+    
+    def calculate_position_size(self, volatility, capital):
         # risk amount is a fixed pct of capital
         capital = self.portfolio_manager.get_cash()
         risk_amount = capital * self.max_risk_per_trade_pct
@@ -50,6 +62,9 @@ class RiskManager:
             return False
         else:
             return True 
+        
+
+
 
 
     

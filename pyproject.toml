@@ -80,7 +80,6 @@ pybind11 = "2.13.6"
 pycryptodome = "3.22.0"
 pygments = "2.18.0"
 pyparsing = "3.2.0"
-python-binance = "1.0.28"
 python-dateutil = "2.9.0.post0"
 python-dotenv = "1.1.0"
 python-math = "0.0.1"
@@ -119,6 +118,7 @@ pyarrow = "^20.0.0"
 redis = "^6.1.0"
 pydantic-settings = "^2.9.1"
 loguru = "^0.7.3"
+python-binance = "^1.0.28"
 
 [build-system]
 requires = ["poetry-core"]

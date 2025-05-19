@@ -3,7 +3,7 @@ import pandas as pd
 
 from binance.client import Client
 
-from bot.config import settings
+from bot.utils.config import settings
 from bot.utils.logger import setup_logger
 
 
@@ -24,7 +24,7 @@ class BinanceApi:
             logger_path="./logs/market",
             level = logging.INFO,
             log_type="market",
-            max_bytes=50*1024*1024a
+            max_bytes=50*1024*1024
         )
 
 

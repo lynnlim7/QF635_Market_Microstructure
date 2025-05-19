@@ -2,29 +2,43 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 import os
 
-# ENV_PATH = Path("/Users/Lynn/Documents/coding_workspace/qf635_market_microstructure_algo_trading/.env")
 class Settings(BaseSettings):
     REDIS_URL: str
-    DB_URL: str
-    BINANCE_WS_URL: str
+    BINANCE_API_KEY: str
+    BINANCE_API_SECRET: str
+    BINANCE_TEST_API_KEY: str
+    BINANCE_TEST_API_SECRET: str
 
     model_config = SettingsConfigDict(
-        env_file="../../.env",
+        env_file=Path(__file__).resolve().parents[2] / ".env",
         env_ignore_empty=True,
+        env_file_encoding='utf-8',
         extra="ignore"
     )
+
+    # Redis config
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
     REDIS_PW: str | None = None
-    REDIS_SSL: bool = True
+    REDIS_SSL: bool = False
     REDIS_MAX_CONNECTIONS: int = 10
     REDIS_SOCKET_TIMEOUT: float = 5.0
     REDIS_SOCKET_CONNECT_TIMEOUT: float = 5.0
     REDIS_RETRY_ON_TIMEOUT: float = 5.0
     REDIS_HEALTH_CHECK_INTERVAL: int = 30
-    REDIS_DECODE_RESPONSE: bool = False 
+    REDIS_DECODE_RESPONSE: bool = True 
     REDIS_PREFIX: str = "market_data"
+
+    # Risk management 
+    MAX_RISK_PER_TRADE_PCT: float = 0.01
+    MAX_ABSOLUTE_DRAWDOWN: float = 0.10 # 10% equity
+    MAX_RELATIVE_DRAWDOWN: float = 0.05 # 5% daily
+
+    # Scoring Parameters
+    SIGNAL_SCORE_BUY: float = 1.0
+    SIGNAL_SCORE_SELL: float = -1.0
+    SIGNAL_SCORE_HOLD: float  = 0
 
 settings = Settings()
 
