@@ -11,7 +11,6 @@ from bot.utils.config import settings
 from bot.services.redis_pub import RedisPublisher
 from bot.common.interface_book import VenueOrderBook, PriceLevel, OrderBook
 from bot.common.interface_order import OrderEvent, OrderStatus, ExecutionType, Side
-import logging
 import os
 import time
 from threading import Thread
@@ -79,14 +78,14 @@ class BinanceGateway:
         self._kline_callbacks = []
 
     def connection(self):
-        logging.info("Initializing connection...")
+        orderbook_logger.info("Initializing connection...")
         self._loop.run_until_complete(self._reconnect_ws())
-        logging.info("Starting event loop thread...")
+        orderbook_logger.info("Starting event loop thread...")
         self._loop_thread.start()
 
     # an internal method to reconnect websocket
     async def _reconnect_ws(self):
-        logging.info("Reconnecting websocket")
+        orderbook_logger.info("Reconnecting websocket")
         # main net
         self.market_data_async_client = await AsyncClient.create()
 

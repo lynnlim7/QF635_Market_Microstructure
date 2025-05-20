@@ -12,7 +12,7 @@ import threading
 import time
 
 def handle_candle(data):
-        print(f"🛠️ Received candlestick: {data}")  
+        print(f"Received candlestick: {data}")  
 
 class RedisSubscriber:
     def __init__(self, channels: list[str]):
