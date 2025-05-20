@@ -3,7 +3,7 @@ import pandas as pd
 
 from binance.client import Client
 
-from bot.config import settings
+from bot.utils.config import settings
 from bot.utils.logger import setup_logger
 
 
