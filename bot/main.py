@@ -16,8 +16,11 @@ import os
 
 symbol = "BTCUSDT" # TODO: potentially get multiple currency pairs
 
-## redis channels
-redis_channel = f"{settings.REDIS_PREFIX}:candlestick:{symbol.lower()}"
+## list of redis channels
+redis_channels = [
+    f"{settings.REDIS_PREFIX}:candlestick:{symbol.lower()}"
+    # add in other channels 
+    ]
 
 ## redis publisher 
 publisher = RedisPublisher()
@@ -34,9 +37,12 @@ def start_binance():
 
 def start_subscriber():
     ## subscribe to redis channel
-    subscriber = RedisSubscriber([redis_channel])
+    subscriber = RedisSubscriber(redis_channels)
     # register handler for diff modules
-    subscriber.redis_handlers[redis_channel]= risk_manager.process_candlestick
+    for channel in redis_channels:
+        if "candlestick" in channel:
+            subscriber.register_handler(channel, risk_manager.process_candlestick)
+        
     subscriber.start_subscribing()
 
 
@@ -49,18 +55,22 @@ def main():
     # engine = PricingEngine(api=api)
     try:
         while True:
-            price_data = risk_manager.candlestick # candlestick data 
-            print(f"Current Price Data: {price_data}")
-            if price_data:
-                    print(f"Current Candlestick: {price_data}")
+            price_data = risk_manager.candlestick # candlestick dataframe
+            if price_data is not None:
+                # if len(price_data)>100:
+                print(f"Current Candlestick: {price_data}")
 
-                    try:
-                        vol = risk_manager.calculate_volatility()
+                try:
+                    vol = risk_manager.calculate_volatility()
+                    if vol is not None:
                         print(f"Volatility: {vol:.4f}")
-                    except Exception as e:
-                        print(f"Error calculating volatility: {e}")
                     else:
-                        print("Waiting for candlestick data...")
+                        print(f"Not enough data..")
+                    
+                except Exception as e:
+                    print(f"Error calculating volatility: {e}")
+                else:
+                    print("Waiting for candlestick data...")
                     time.sleep(5)
     except Exception as e:
         print(f"Test interrupted: {e}")

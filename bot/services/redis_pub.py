@@ -9,6 +9,7 @@ import time
 import orjson
 from bot.utils.logger import setup_logger
 from bot.utils.config import settings
+from bot.utils.func import get_candlestick_channel
 
 class RedisPublisher:
     def __init__(
@@ -32,9 +33,8 @@ class RedisPublisher:
     
     def publish(self, channel:str, data):
         try:
-            created_channel = self.create_channel(channel)
-            redis_key = f"{self.prefix}:{created_channel}"
-            logging.info(f"Publishing to channel: {self.prefix}:{channel} with data: {data}")
+            redis_key = self.create_channel(channel)
+            logging.info(f"Publishing to channel: {redis_key} with data: {data}")
 
             message = orjson.dumps(data)
             self.redis.set(redis_key,message)

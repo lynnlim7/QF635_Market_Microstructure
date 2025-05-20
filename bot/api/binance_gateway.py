@@ -11,6 +11,7 @@ from bot.utils.config import settings
 from bot.services.redis_pub import RedisPublisher
 from bot.common.interface_book import VenueOrderBook, PriceLevel, OrderBook
 from bot.common.interface_order import OrderEvent, OrderStatus, ExecutionType, Side
+from bot.utils.func import get_candlestick_channel, get_execution_channel, get_orderbook_channel
 import os
 import time
 from threading import Thread
@@ -121,7 +122,8 @@ class BinanceGateway:
                         "asks": msg['a'][:5],
                         "source": "orderbook"
                     }
-                    self.publisher.publish(f"orderbook:{self._symbol}", orderbook_dict)
+                    orderbook_channel = get_orderbook_channel(self._symbol)
+                    self.publisher.publish(orderbook_channel, orderbook_dict)
                     orderbook_logger.info(f"{orderbook_dict['symbol']} | best bid: {orderbook_dict['bids'][0]} | best ask: {orderbook_dict['asks'][0]}")
 
                     if self._depth_callbacks:
@@ -152,7 +154,8 @@ class BinanceGateway:
                             "timestamp": int(time.time() * 1000),
                             "source": "execution"
                             }
-                    self.publisher.publish(f"execution:{self._symbol}", execution_dict)
+                    polling_channel = get_execution_channel(self._symbol)
+                    self.publisher.publish(polling_channel, execution_dict)
                     polling_logger.info(f"Poll | {execution_dict['symbol']} | order_id: {execution_dict['order_id']} | status: {order_status}")
 
                     # create order event 
@@ -196,7 +199,8 @@ class BinanceGateway:
                         "end_time": k['T'],
                         "source": "candlestick"
                     }
-                    self.publisher.publish(f"candlestick:{self._symbol}", candles_dict)
+                    candlestick_channel = get_candlestick_channel(self._symbol)
+                    self.publisher.publish(candlestick_channel, candles_dict)
                     kline_logger.info(f"{candles_dict['symbol']} | open: {float(k['o'])}, close: {float(k['c'])}, volume: {float(k['v'])}")
 
                     if self._kline_callbacks:

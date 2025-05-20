@@ -3,6 +3,7 @@ Subscribe and listen to live market data
 """
 
 from typing import Any
+from collections import defaultdict
 import logging
 import redis 
 import orjson
@@ -10,9 +11,6 @@ from bot.utils.logger import setup_logger
 from bot.utils.config import settings
 import threading
 import time
-
-def handle_candle(data):
-        print(f"Received candlestick: {data}")  
 
 class RedisSubscriber:
     def __init__(self, channels: list[str]):
@@ -24,11 +22,11 @@ class RedisSubscriber:
         )
         self.pubsub = self.redis_client.pubsub() 
         self.pubsub.subscribe(*channels) # subscribe to multiple redis channels
-        self.redis_handlers = {} # initialize dict to map to callback funcs 
+        self.redis_handlers = defaultdict(list) # initialize dict to map to list of callback funcs 
     
-    # route to other modules
+    # route to multiple modules
     def register_handler(self, channel: str, callback: callable):
-        self.redis_handlers[channel] = callback
+        self.redis_handlers[channel].append(callback)
 
     def start_subscribing(self):
         def _listen():
@@ -39,7 +37,8 @@ class RedisSubscriber:
                 channel = message['channel']
                 try:
                     data = orjson.loads(message["data"])
-                    if handler := self.redis_handlers.get(channel):
+                    handlers = self.redis_handlers.get(channel, [])
+                    for handler in handlers:
                         handler(data)
                 except Exception as e:
                     print(f"Error in handling message:{e}")
