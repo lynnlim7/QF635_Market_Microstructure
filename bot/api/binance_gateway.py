@@ -20,6 +20,7 @@ from threading import Thread
 import pandas as pd
 from binance.ws.depthcache import FuturesDepthCacheManager
 import schedule
+import websockets
 
 
 # initialize redis pub
@@ -43,6 +44,13 @@ kline_logger = setup_logger(
             logger_name="kline", 
             logger_path="./logs/market",
             log_type="kline",
+            enable_console=False
+            )
+
+execution_logger = setup_logger(
+            logger_name="execution",
+            logger_path="./logs/market",
+            log_type="execution",
             enable_console=False
             )
 
@@ -86,6 +94,7 @@ class BinanceGateway:
         self._depth_callbacks = []
         self._polling_callbacks = []
         self._kline_callbacks = []
+        self._execution_callbacks = []
 
         # test depth websocket
         self._dcm = None  # depth cache, which implements the logic to manage a local order book
@@ -121,7 +130,7 @@ class BinanceGateway:
     def _run_async_tasks(self):
         """ Run the following tasks concurrently in the current thread """
         self._loop.create_task(self._listen_futures_depth_forever())
-        # self._loop.create_task(self._poll_order_updates())
+        self._loop.create_task(self._listen_execution_forever())
         self._loop.create_task(self._listen_kline_forever())
         self._loop.run_forever()
 
@@ -145,7 +154,7 @@ class BinanceGateway:
 
                 orderbook_channel = get_orderbook_channel(self._symbol)
                 self.publisher.publish(orderbook_channel, order_book.to_dict())
-                orderbook_logger.info(f"Received orderbook: {order_book.to_dict()}")
+                orderbook_logger.info(f"{order_book.contract_name} | best bid: {order_book.bids[0]} | best ask: {order_book.asks[0]}")
 
                 if self._depth_callbacks:
                     # notify callbacks
@@ -197,9 +206,59 @@ class BinanceGateway:
             except Exception as e:
                 polling_logger.exception("Error encountered while polling updates..")
                 await asyncio.sleep(5)
-    
+
+
+    # an internal async method to listen to user data stream
+    async def _listen_execution_forever(self):
+        execution_logger.info("Subscribing to user data events")
+        self._listen_key = await self._async_client.futures_stream_get_listen_key()
+        if self._testnet:
+            url = 'wss://stream.binancefuture.com/ws/' + self._listen_key
+        else:
+            url = 'wss://fstream.binance.com/ws/' + self._listen_key
+
+        conn = websockets.connect(url)
+        ws = await conn.__aenter__()
+        while ws.open:
+            _message = await ws.recv()
+            # logging.info(_message)
+
+            # convert to json
+            _data = json.loads(_message)
+            update_type = _data.get('e')
+
+            if update_type == 'ORDER_TRADE_UPDATE':
+                _trade_data = _data.get('o')
+                _order_id = _trade_data.get('c')
+                _symbol = _trade_data.get('s')
+                _execution_type = _trade_data.get('x')
+                _order_status = _trade_data.get('X')
+                _side = _trade_data.get('S')
+                _last_filled_price = float(_trade_data.get('L'))
+                _last_filled_qty = float(_trade_data.get('l'))
+
+                # create an order event
+                _order_event = OrderEvent(_symbol, _order_id, ExecutionType[_execution_type], OrderStatus[_order_status])
+                _order_event.side = Side[_side]
+                if _execution_type == 'TRADE':
+                    _order_event.last_filled_price = _last_filled_price
+                    _order_event.last_filled_quantity = _last_filled_qty
+
+                execution_channel = get_execution_channel(self._symbol)
+                self.publisher.publish(execution_channel, _order_event.to_dict())
+                execution_logger.info(f"Order Trade update: {_order_event.to_dict()}")
+                
+                # notify callbacks
+                if self._execution_callbacks:
+                    # notify callbacks
+                    for _callback in self._execution_callbacks:
+                        _callback(_order_event)
+            else:
+                print(f"random msg: {_data}")
+
     async def _listen_kline_forever(self):
         kline_logger.info("Subscribing to kline stream")
+        # ws url: 'wss://fstream.binance.com/'
         kline_socket = self.binance_socket_manager.kline_futures_socket(symbol=self._symbol, interval=Client.KLINE_INTERVAL_1MINUTE)
 
         # async manager to make sure ws is connected and opened

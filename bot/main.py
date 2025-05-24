@@ -93,8 +93,6 @@ def main():
         time.sleep(1)
 
     ## initialize modules
-    # api = BinanceApi()
-    # engine = PricingEngine(api=api)
     try:
         global strategy_instance
         strategy_instance = MACDStrategy(symbol, gateway_instance)
