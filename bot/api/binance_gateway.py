@@ -6,6 +6,8 @@
 
 import asyncio
 from binance import AsyncClient, BinanceSocketManager, Client
+import json
+
 from bot.utils.logger import setup_logger
 from bot.utils.config import settings
 from bot.services.redis_pub import RedisPublisher
@@ -15,6 +17,10 @@ from bot.utils.func import get_candlestick_channel, get_execution_channel, get_o
 import os
 import time
 from threading import Thread
+import pandas as pd
+from binance.ws.depthcache import FuturesDepthCacheManager
+import schedule
+
 
 # initialize redis pub
 redis_publisher = RedisPublisher(prefix="market_data")
@@ -53,7 +59,7 @@ class BinanceGateway:
         self.publisher = redis_publisher
 
         # binance async client
-        self._client = Client(api_key, api_secret, testnet=True)
+        self._client = Client(self._api_key, self._api_secret, testnet=True)
         self._async_client = None
         self._dcm = None  # depth cache, which implements the logic to manage a local order book
         self._dws = None  # depth async WebSocket session
@@ -63,8 +69,11 @@ class BinanceGateway:
         self.market_data_async_client = None
 
         # binance test net 
-        self.trade_client = Client(settings.BINANCE_TEST_API_KEY, settings.BINANCE_TEST_API_SECRET)
-        self.trade_client.API_URL = "https://testnet.binance.vision/api"
+        self.trade_client = Client(settings.BINANCE_TEST_API_KEY, settings.BINANCE_TEST_API_SECRET, testnet=True)
+
+        # binance socket managers
+        self.binance_socket_manager = None
+        self.binance_test_socket_manager = None
 
         # depth cache
         self._depth_cache = None
@@ -78,11 +87,20 @@ class BinanceGateway:
         self._polling_callbacks = []
         self._kline_callbacks = []
 
+        # test depth websocket
+        self._dcm = None  # depth cache, which implements the logic to manage a local order book
+        self._dws = None  # depth async WebSocket session
+
     def connection(self):
         orderbook_logger.info("Initializing connection...")
         self._loop.run_until_complete(self._reconnect_ws())
         orderbook_logger.info("Starting event loop thread...")
         self._loop_thread.start()
+        schedule.every(15).minutes.do(self._extend_listen_key)
+
+    def _extend_listen_key(self):
+        print(f"Extending listen key")
+        self._client.futures_stream_keepalive(self._listen_key)
 
     # an internal method to reconnect websocket
     async def _reconnect_ws(self):
@@ -96,51 +114,57 @@ class BinanceGateway:
             api_secret = self._api_secret, 
             testnet=True)
 
+        self.binance_socket_manager = BinanceSocketManager(self.market_data_async_client)
+        self.binance_test_socket_manager = BinanceSocketManager(self._async_client)
+
     # an internal method to runs tasks in parallel
     def _run_async_tasks(self):
         """ Run the following tasks concurrently in the current thread """
-        self._loop.create_task(self._listen_depth_forever())
-        self._loop.create_task(self._poll_order_updates())
+        self._loop.create_task(self._listen_futures_depth_forever())
+        # self._loop.create_task(self._poll_order_updates())
         self._loop.create_task(self._listen_kline_forever())
         self._loop.run_forever()
 
-    # an internal async method to listen to depth stream
-    async def _listen_depth_forever(self):
-        bsm = BinanceSocketManager(self.market_data_async_client)
-        socket = bsm.depth_socket(symbol=self._symbol)
-        orderbook_logger.info("Subscribing to depth stream")
+    async def _listen_futures_depth_forever(self):
+        orderbook_logger.info("Subscribing to depth events")
+        while True:
+            if not self._dws:
+                orderbook_logger.info("depth socket not connected, reconnecting")
+                # current stream url is this: 'wss://stream.binancefuture.com/'
+                self._dcm = FuturesDepthCacheManager(self._async_client, symbol=self._symbol)
+                self._dws = await self._dcm.__aenter__()
 
-        async with socket as stream:
-            while True:
-                # wait for depth update
-                try:
-                    msg = await stream.recv()
-                    orderbook_dict = {
-                        "symbol": self._symbol,
-                        "timestamp": msg['E'],
-                        "bids": msg['b'][:5],
-                        "asks": msg['a'][:5],
-                        "source": "orderbook"
-                    }
-                    orderbook_channel = get_orderbook_channel(self._symbol)
-                    self.publisher.publish(orderbook_channel, orderbook_dict)
-                    orderbook_logger.info(f"{orderbook_dict['symbol']} | best bid: {orderbook_dict['bids'][0]} | best ask: {orderbook_dict['asks'][0]}")
+            # wait for depth update
+            try:
+                self._depth_cache = await self._dws.recv()
 
-                    if self._depth_callbacks:
-                        # notify callbacks
-                        for _callback in self._depth_callbacks:
-                            _callback(orderbook_dict)
-                except Exception as e:
-                    orderbook_logger.exception('Encountered issue in depth processing')
-                    await asyncio.sleep(5)
-            await client.close_connection()
+                # generating orderbook object
+                bids = [PriceLevel(price=p, size=s) for (p, s) in self._depth_cache.get_bids()[:5]]
+                asks = [PriceLevel(price=p, size=s) for (p, s) in self._depth_cache.get_asks()[:5]]
+                order_book = OrderBook(timestamp=self._depth_cache.update_time, contract_name=self._symbol, bids=bids, asks=asks)
+
+                orderbook_channel = get_orderbook_channel(self._symbol)
+                self.publisher.publish(orderbook_channel, order_book.to_dict())
+                orderbook_logger.info(f"Received orderbook: {order_book.to_dict()}")
+
+                if self._depth_callbacks:
+                    # notify callbacks
+                    for _callback in self._depth_callbacks:
+                        _callback(self._depth_cache)
+            except Exception as e:
+                orderbook_logger.exception('encountered issue in depth processing')
+                # reset socket and reconnect
+                self._dws = None
+                await self._reconnect_ws()
 
     # testnet polling of trade orders
     async def _poll_order_updates(self):
+        # bsm = BinanceSocketManager(self.market_data_async_client)
+        # socket = self.binance_test_socket_manager.user_socket()
         polling_logger.info("Polling order status")
         while True: 
             try:
-                open_orders = self.trade_client.get_open_orders(symbol=self._symbol.upper())
+                open_orders = self.trade_client.futures_get_open_orders(symbol=self._symbol.upper())
                 for order in open_orders:
                     order_status = order['status']
                     execution_dict = {
@@ -150,7 +174,7 @@ class BinanceGateway:
                             "order_status": order_status,
                             "side": order['side'],
                             "price": float(order['price']),
-                            "quantity": float(order['quantity']),
+                            "quantity": float(order['origQty']),
                             "timestamp": int(time.time() * 1000),
                             "source": "execution"
                             }
@@ -176,8 +200,7 @@ class BinanceGateway:
     
     async def _listen_kline_forever(self):
         kline_logger.info("Subscribing to kline stream")
-        socket_manager = BinanceSocketManager(self.market_data_async_client)
-        kline_socket = socket_manager.kline_socket(symbol=self._symbol, interval=Client.KLINE_INTERVAL_1MINUTE)
+        kline_socket = self.binance_socket_manager.kline_futures_socket(symbol=self._symbol, interval=Client.KLINE_INTERVAL_1MINUTE)
 
         # async manager to make sure ws is connected and opened
         async with kline_socket as stream:
@@ -187,7 +210,7 @@ class BinanceGateway:
                     k = message['k']
 
                     candles_dict = {
-                        "symbol": k['s'],
+                        "symbol": message['ps'],
                         "interval": k['i'],
                         "open": float(k['o']),
                         "close": float(k['c']),
@@ -201,7 +224,7 @@ class BinanceGateway:
                     }
                     candlestick_channel = get_candlestick_channel(self._symbol)
                     self.publisher.publish(candlestick_channel, candles_dict)
-                    kline_logger.info(f"{candles_dict['symbol']} | open: {float(k['o'])}, close: {float(k['c'])}, volume: {float(k['v'])}")
+                    kline_logger.info(f"{candles_dict['symbol']} | open: {float(k['o'])}, close: {float(k['c'])}, volume: {float(k['v'])}, is_closed: {k['x']}")
 
                     if self._kline_callbacks:
                         for _callback in self._kline_callbacks:
@@ -215,20 +238,35 @@ class BinanceGateway:
     def place_limit_order(self, side: Side, price, quantity, tif='IOC') -> bool:
         try:
             if self._client is None:
-                self._client = Client(self._api_key, self._api_secret)
-                if self._testnet:
-                    self._client.API_URL = "https://testnet.binance.vision/api"
-            order_response = self._client.create_order(symbol=self._symbol,
+                self._client = Client(self._api_key, self._api_secret, testnet=True)
+
+                    # self._client.create_test_order()
+            order_response = self._client.futures_create_order(symbol=self._symbol.upper(),
                                               side=side.name,
-                                              type='LIMIT',
+                                              type=Client.ORDER_TYPE_LIMIT,
                                               price=price,
                                               quantity=quantity,
                                               timeInForce=tif)
-            polling_logger.info(f"Order submitted")
-            return order_response['orderId']
+            polling_logger.info(f"Order submitted: {order_response}")
+            return order_response
         except Exception as e:
-            polling_logger.info("Failed to place order: {}".format(e))
+            polling_logger.error("Failed to place order: {}".format(e))
             return False
+
+
+    def cancel_order(self, order_id) -> bool:
+        try:
+            if self._client is None:
+                self._client = Client(self._api_key, self._api_secret, testnet=True)
+
+            order_response = self._client.futures_cancel_order(symbol=self._symbol.upper(), origClientOrderId=order_id)
+            return order_response
+        except Exception as e:
+            polling_logger.warning("Failed to cancel order: {}, {}".format(order_id, e))
+            return False
+
+
+
 
     """ 
     Register a depth callback function that takes one argument: (book: VenueOrderBook) 
@@ -245,6 +283,38 @@ class BinanceGateway:
     def register_kline_callback(self, callback):
         self._kline_callbacks.append(callback)
 
+
+    """ 
+    Get Candle Data
+    """
+    def get_ohlcv(self, symbol="BTCUSDT", interval=Client.KLINE_INTERVAL_1MINUTE, limit=200):
+        candles = self._client.get_klines(symbol=symbol, interval=interval, limit=limit)
+
+        # Convert to Polars DataFrame
+        df = pd.DataFrame(candles, columns=[
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_asset_volume",
+            "number_of_trades",
+            "taker_buy_base_asset_volume",
+            "taker_buy_quote_asset_volume",
+            "ignore"
+        ])
+
+        numeric_columns = ["open", "high", "low", "close", "volume",
+                           "quote_asset_volume", "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume"]
+        df[numeric_columns] = df[numeric_columns].astype(float)
+        df = df.drop(columns=['ignore'])
+        return df
+
+    def get_close_prices_df(self, symbol="BTCUSDT", interval=Client.KLINE_INTERVAL_1MINUTE, limit=200):
+        df = self.get_ohlcv(symbol, interval, limit)
+        return df[['timestamp', 'close']]
 
 # callback on order book update
 def on_orderbook(order_book: VenueOrderBook):
