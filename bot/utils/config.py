@@ -3,9 +3,6 @@ from pathlib import Path
 import os
 
 class Settings(BaseSettings):
-    REDIS_URL: str
-    BINANCE_API_KEY: str
-    BINANCE_API_SECRET: str
     BINANCE_TEST_API_KEY: str
     BINANCE_TEST_API_SECRET: str
 
@@ -17,7 +14,8 @@ class Settings(BaseSettings):
     )
 
     # Redis config
-    REDIS_HOST: str = "redis"
+    # if running whole application in docker, use "redis"
+    REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
     REDIS_PW: str | None = None

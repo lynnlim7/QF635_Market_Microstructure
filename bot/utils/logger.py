@@ -55,3 +55,12 @@ def setup_logger(
         return logger
 
 
+def set_basic_logger(_logger_name: str) -> logging.Logger:
+    logger = setup_logger(
+        logger_name=_logger_name,
+        logger_path="./logs/",
+        enable_console=True
+    )
+    # prevent duplicated logs
+    logger.propagate = False
+    return logger

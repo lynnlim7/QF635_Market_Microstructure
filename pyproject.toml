@@ -119,6 +119,8 @@ redis = "^6.1.0"
 pydantic-settings = "^2.9.1"
 loguru = "^0.7.3"
 python-binance = "^1.0.28"
+flask = "^3.1.1"
+schedule = "^1.2.2"
 
 [build-system]
 requires = ["poetry-core"]

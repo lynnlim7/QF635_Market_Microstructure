@@ -4,13 +4,15 @@ Subscribe and listen to live market data
 
 from typing import Any
 from collections import defaultdict
-import logging
-import redis 
+import redis
 import orjson
-from bot.utils.logger import setup_logger
+
+from bot.utils.logger import set_basic_logger
 from bot.utils.config import settings
 import threading
 import time
+
+logger = set_basic_logger("redis_sub")
 
 class RedisSubscriber:
     def __init__(self, channels: list[str]):
@@ -41,7 +43,7 @@ class RedisSubscriber:
                     for handler in handlers:
                         handler(data)
                 except Exception as e:
-                    print(f"Error in handling message:{e}")
+                    logger.error(f"Error in handling message:{e}")
         threading.Thread(target=_listen, daemon=True).start()
 
 

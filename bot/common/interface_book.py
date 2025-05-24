@@ -8,6 +8,8 @@ class PriceLevel:
     def __str__(self):
         return '[' + str(self.price) + " | " + str(self.size) + ']'
 
+    def to_dict(self):
+        return {"price": self.price, "quantity": self.size}
 
 # An order book with bid and ask sides
 class OrderBook:
@@ -18,12 +20,12 @@ class OrderBook:
         self.asks = asks
 
     def __str__(self):
-        string = ' Bids:'
-        for tier in self.bids[:3]:
+        string = ' BIDS: '
+        for tier in self.bids[:5]:
             string += str(tier)
 
-        string = string + ' Asks:'
-        for tier in self.asks[:3]:
+        string = string + ' ASK: '
+        for tier in self.asks[:5]:
             string += str(tier)
 
         return string
@@ -34,6 +36,13 @@ class OrderBook:
     def get_best_ask(self):
         return self.asks[0].price
 
+    def to_dict(self):
+        return {
+            "contract_name": self.contract_name,
+            "timestamp": self.timestamp,
+            "bids": [b.to_dict() for b in self.bids],
+            "asks": [a.to_dict() for a in self.asks],
+        }
 
 # A venue order book telling us the exchange that provides the order book
 class VenueOrderBook:

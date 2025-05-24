@@ -1,12 +1,12 @@
 
 from abc import ABC, abstractmethod
 
-from bot.client.binance_api import BinanceApi
+from bot.api.binance_gateway import BinanceGateway
 
 
 class BaseStrategy(ABC):
     @abstractmethod
-    def __init__(self, symbol: str,api: BinanceApi, config: dict = None):
+    def __init__(self, symbol: str,api: BinanceGateway, config: dict = None):
         """Initialize the strategy with symbol and config."""
         pass
 
