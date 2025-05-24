@@ -2,15 +2,14 @@
 Subscribe and listen to live market data
 """
 
-from typing import Any
-from collections import defaultdict
-import redis
-import orjson
-
-from bot.utils.logger import set_basic_logger
-from bot.utils.config import settings
 import threading
-import time
+from collections import defaultdict
+
+import orjson
+import redis
+
+from bot.utils.config import settings
+from bot.utils.logger import set_basic_logger
 
 logger = set_basic_logger("redis_sub")
 

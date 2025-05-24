@@ -1,25 +1,34 @@
 from flask import jsonify, request
 
+from bot.api.binance_api import BinanceApi
 from bot.common.interface_order import Side
 
 
-def register_routes(app, gateway_accessor):
+def register_routes(app, binance_api:BinanceApi):
     @app.get("/")
     def home():
         return "Welcome to the trading bot!"
 
+    @app.get("/position")
+    def get_position():
+        if binance_api is None:
+            return jsonify({"error": "Gateway not initialized"}), 503
+        try:
+            result = binance_api.get_current_position()
+            return jsonify({"result": result})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
     @app.post("/cancel-order")
     def cancel_order():
-        gateway = gateway_accessor()
 
-        if gateway is None:
+        if binance_api is None:
             return jsonify({"error": "Gateway not initialized"}), 503
         try:
             data = request.get_json()
             _order_id = data['orderId']
 
-            result = gateway.cancel_order(
+            result = binance_api.cancel_order(
                 order_id = _order_id
             )
 
@@ -29,19 +38,13 @@ def register_routes(app, gateway_accessor):
 
     @app.post("/create-order")
     def create_order():
-        gateway = gateway_accessor()
-
-        if gateway is None:
-            return jsonify({"error": "Gateway not initialized"}), 503
-
         try:
             data = request.get_json()
             _side = Side[data["side"].upper()]
             _quantity = float(data["quantity"])
             _price = float(data["price"])
             _tif = data["timeInForce"]
-
-            result = gateway.place_limit_order(
+            result = binance_api.place_limit_order(
                 side = _side,
                 quantity= _quantity,
                 price= _price,

@@ -1,6 +1,7 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
-import os
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 class Settings(BaseSettings):
     BINANCE_TEST_API_KEY: str
@@ -12,6 +13,9 @@ class Settings(BaseSettings):
         env_file_encoding='utf-8',
         extra="ignore"
     )
+
+    # Symbol
+    SYMBOL: str = "BTCUSDT"
 
     # Redis config
     # if running whole application in docker, use "redis"
@@ -37,6 +41,8 @@ class Settings(BaseSettings):
     SIGNAL_SCORE_BUY: float = 1.0
     SIGNAL_SCORE_SELL: float = -1.0
     SIGNAL_SCORE_HOLD: float  = 0
+
+
 
 settings = Settings()
 

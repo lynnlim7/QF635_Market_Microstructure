@@ -1,24 +1,23 @@
 # from binance import SIDE_BUY, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC
+import threading
+import time
+
 from flask import Flask
 
+from bot.api.binance_api import BinanceApi
 from bot.api.binance_gateway import BinanceGateway
-# from bot.pricing.PricingEngine import PricingEngine
-from bot.risk.risk_manager import RiskManager
 from bot.portfolio.PortfolioManager import PortfolioManager
+from bot.risk.risk_manager import RiskManager
 from bot.routes import register_routes
+from bot.services.redis_pub import RedisPublisher
+from bot.services.redis_sub import RedisSubscriber
 from bot.strategy.base_strategy import BaseStrategy
 from bot.strategy.macd_strategy import MACDStrategy
-from bot.services.redis_sub import RedisSubscriber
-from bot.services.redis_pub import RedisPublisher
 from bot.utils.config import settings
 from bot.utils.func import get_execution_channel, get_orderbook_channel
-from bot.utils.logger import setup_logger, set_basic_logger
-import time
-import threading
-import os
-import logging
+from bot.utils.logger import set_basic_logger
 
-symbol = "BTCUSDT" # TODO: potentially get multiple currency pairs
+symbol = settings.SYMBOL
 logger = set_basic_logger("main")
 
 ## list of redis channels
@@ -36,12 +35,13 @@ risk_manager = RiskManager(
     candlestick={},
     portfolio_manager=portfolio
 )
+
 gateway_instance: BinanceGateway | None = None
 strategy_instance: BaseStrategy | None = None
+binance_api = BinanceApi(settings.SYMBOL)
+
 app = Flask(__name__)
-register_routes(app, gateway_accessor=lambda: gateway_instance)
-
-
+register_routes(app, binance_api)
 
 def start_binance() -> None:
     logger.info("Starting binance now")
@@ -88,14 +88,10 @@ def start_flask():
 def main():
     logger.info(f"Start trading..")
 
-    while gateway_instance is None:
-        logger.info("Waiting for BinanceGateway to initialize...")
-        time.sleep(1)
-
     ## initialize modules
     try:
         global strategy_instance
-        strategy_instance = MACDStrategy(symbol, gateway_instance)
+        strategy_instance = MACDStrategy(symbol)
 
         while True:
             price_data = risk_manager.candlestick # candlestick dataframe

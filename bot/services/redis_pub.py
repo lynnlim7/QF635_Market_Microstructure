@@ -2,14 +2,13 @@
 Publish serialized market data from gateway to specified channel for other modules to subscribe
 """
 
-from typing import Any
 import logging
-import redis 
-import time
+
 import orjson
-from bot.utils.logger import setup_logger
+import redis
+
 from bot.utils.config import settings
-from bot.utils.func import get_candlestick_channel
+
 
 class RedisPublisher:
     def __init__(
