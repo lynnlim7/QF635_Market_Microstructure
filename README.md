@@ -42,6 +42,11 @@ poetry self add poetry-plugin-export
 cd QF635_Market_Microstructure
 poetry install
 poetry shell
+
+# Add packages 
+poetry add <package_name>
+# Freeze
+poetry export --without-hashes --format=requirements.txt > requirements.txt
 ```
 
 3. Run project 

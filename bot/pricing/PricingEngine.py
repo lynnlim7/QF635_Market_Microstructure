@@ -1,7 +1,7 @@
-from bot.client.binance_api import BinanceApi
+from bot.api.binance_gateway import BinanceGateway
 
 class PricingEngine:
-    def __init__(self, api: BinanceApi):
+    def __init__(self, api: BinanceGateway):
         self.api = api
 
 

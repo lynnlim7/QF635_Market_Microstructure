@@ -1,18 +1,23 @@
-import numpy as np
 import pandas as pd
 from binance import Client
-from numpy.random import get_state
 
-from bot.client.binance_api import BinanceApi
+from bot.api.binance_api import BinanceApi
 from bot.strategy.base_strategy import BaseStrategy
+from bot.utils.config import settings
 
+from bot.utils.logger import setup_logger
 
-
+macd_logger = setup_logger(
+            logger_name="macd",
+            logger_path="./logs/strategy",
+            log_type="strategy",
+            enable_console=False
+            )
 
 
 class MACDStrategy(BaseStrategy):
     def __init__(self, symbol: str,
-                 api: BinanceApi,
+                 api:BinanceApi=None,
                  config=None):
         if config is None:
             config = {
@@ -21,7 +26,12 @@ class MACDStrategy(BaseStrategy):
                 "signal_period": 9,
                 "smoothing_factor": 2,
             }
-        self.api = api
+
+        if api is None:
+            self.api = BinanceApi(symbol)
+        else:
+            self.api = api
+
         self.symbol = symbol
         self.latest_macd = None
         self.latest_signal_line = None
@@ -32,10 +42,17 @@ class MACDStrategy(BaseStrategy):
         self.initialise_data()
         self.print_state()
 
-
     def initialise_data(self):
+        macd_logger.info("Initialising data now")
+
+        if self.api is None:
+            raise RuntimeError("Binance Gateway not initialised yet, please initialise it first before instantiating the strategy")
+
         # Fetch the initial close prices and load them into a DataFrame
         self.data = self.api.get_close_prices_df(symbol=self.symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=200)
+
+        if self.data is None or len(self.data) == 0:
+            raise RuntimeError("Unable to get data")
 
         # Calculate MACD and Signal Line for the initial data
         self.data['EMA_FAST'] = self.data['close'].ewm(span=self.config['fast_period'], adjust=False).mean()
@@ -51,17 +68,20 @@ class MACDStrategy(BaseStrategy):
         # this is to initialise the last action so it won't instantly ask me to buy or sell in the first ticket
         self.generate_signal()
 
-    def update_data(self, last_candle):
+    def update_data(self, last_candle: dict):
         """
         Update the strategy with the latest data.
         This function appends the latest close price and recalculates the MACD and Signal Line.
         """
-        previous_data = self.data.iloc[-1]
-        if previous_data['timestamp'] == last_candle['timestamp']:
-            print('already added, will not add')
+        if not last_candle['is_closed']:
             return
 
-        new_data = pd.DataFrame({'timestamp': [last_candle['timestamp']], 'close': [last_candle['close']]})
+        previous_data = self.data.iloc[-1]
+        if previous_data['timestamp'] == last_candle['start_time']:
+            macd_logger.info('[updateData] already added, will not add')
+            return
+
+        new_data = pd.DataFrame({'timestamp': [last_candle['start_time']], 'close': [last_candle['close']]})
         self.data = pd.concat([self.data, new_data], ignore_index=True)
 
         new_close = last_candle['close']
@@ -97,7 +117,7 @@ class MACDStrategy(BaseStrategy):
         self.data.loc[self.data.index[-1], 'MACD'] = macd
         self.data.loc[self.data.index[-1], 'Signal_Line'] = signal_line
 
-
+        self.generate_signal()
 
     def generate_signal(self) -> int:
         """
@@ -106,16 +126,18 @@ class MACDStrategy(BaseStrategy):
         - Sell when MACD crosses below the Signal Line
         """
         if self.latest_macd is None or self.latest_signal_line is None:
-            return 0  # Not enough data
+            return settings.SIGNAL_SCORE_HOLD  # Not enough data
 
         # Signal Generation Logic
         if self.latest_macd > self.latest_signal_line and self.last_action != "BUY":
+            macd_logger.info(f"[Signal]: Buy signal triggered. state: {self.get_state()}")
             self.last_action = "BUY"
-            return 1
+            return settings.SIGNAL_SCORE_BUY
 
         elif self.latest_macd < self.latest_signal_line and self.last_action != "SELL":
+            macd_logger.info(f"[Signal]: Sell signal triggered. state: {self.get_state()}")
             self.last_action = "SELL"
-            return -1
+            return settings.SIGNAL_SCORE_SELL
 
         return 0
 
@@ -125,8 +147,8 @@ class MACDStrategy(BaseStrategy):
             "macd": self.latest_macd,
             "signal_line": self.latest_signal_line,
             "last_action": self.last_action,
-            "last_price": self.data.iloc[-1]
+            "last_price": self.data.iloc[-1]['close']
         }
 
     def print_state(self):
-        print(f"Current state: {self.get_state()}")
+        macd_logger.info(f"[State] {self.get_state()}")

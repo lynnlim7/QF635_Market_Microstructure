@@ -4,12 +4,13 @@ from unittest.mock import MagicMock
 import numpy as np
 import pandas as pd
 from binance.client import Client
-from bot.client.binance_api import BinanceApi
+
+from bot.api.binance_gateway import BinanceGateway
 from bot.strategy.macd_strategy import MACDStrategy
 
 class TestMACDStrategy(unittest.TestCase):
     def setUp(self):
-        self.api_mock = MagicMock(spec=BinanceApi)
+        self.api_mock = MagicMock(spec=BinanceGateway)
         # Simulated data for testing (sample close prices)
         mock_data = {
             "timestamp": [1, 2, 3, 4, 5, 6],
@@ -34,7 +35,7 @@ class TestMACDStrategy(unittest.TestCase):
         self.assertEqual(self.strategy.latest_signal_line, expected_signal_line)
 
     def test_update_data(self):
-        new_candle = {"timestamp": 7, "close": 47000, "volume": 100}
+        new_candle = {"start_time": 7, "close": 47000, "volume": 100, "is_closed": True}
         self.strategy.update_data(new_candle)
 
         self.assertEqual(len(self.strategy.data), 7)
@@ -47,7 +48,7 @@ class TestMACDStrategy(unittest.TestCase):
         self.assertEqual(self.strategy.latest_signal_line, expected_signal_line)
 
     def test_update_data_duplicate_data(self):
-        new_candle = {"timestamp": 7, "close": 47000, "volume": 100}
+        new_candle = {"start_time": 7, "close": 47000, "volume": 100, "is_closed": True}
         self.strategy.update_data(new_candle)
 
         self.assertEqual(len(self.strategy.data), 7)
