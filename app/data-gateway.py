@@ -4,7 +4,7 @@ import os
 import asyncio
 import logging
 
-from libs.datafeeds import KlineTask, TradeTask, SpotDataGateway, BookTickerTask
+from bot.datafeeds import KlineTask, TradeTask, SpotDataGateway, BookTickerTask
 import sys
 
 
@@ -19,7 +19,7 @@ logging.basicConfig(
 async def init_spot_gateway(spot_subs, redis_params):
     spot_rpool = redis.ConnectionPool(
         db=0,
-        max_connections=10,
+        max_connections=40,
         decode_responses=False,
         **redis_params
     )

@@ -20,3 +20,5 @@ logs/
 pg_data/
 
 TODO.md
+historical/
+logs
