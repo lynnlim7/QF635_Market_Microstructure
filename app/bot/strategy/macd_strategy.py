@@ -1,12 +1,9 @@
-import numpy as np
 import pandas as pd
 from binance import Client
-from numpy.random import get_state
 
-from bot.api.binance_gateway import BinanceGateway
+from bot.api.binance_api import BinanceApi
 from bot.strategy.base_strategy import BaseStrategy
 from bot.utils.config import settings
-import time
 
 from bot.utils.logger import setup_logger
 
@@ -20,7 +17,7 @@ macd_logger = setup_logger(
 
 class MACDStrategy(BaseStrategy):
     def __init__(self, symbol: str,
-                 api: BinanceGateway | None,
+                 api:BinanceApi=None,
                  config=None):
         if config is None:
             config = {
@@ -29,7 +26,12 @@ class MACDStrategy(BaseStrategy):
                 "signal_period": 9,
                 "smoothing_factor": 2,
             }
-        self.api = api
+
+        if api is None:
+            self.api = BinanceApi(symbol)
+        else:
+            self.api = api
+
         self.symbol = symbol
         self.latest_macd = None
         self.latest_signal_line = None
