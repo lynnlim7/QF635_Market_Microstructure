@@ -33,7 +33,7 @@ redis_channels = [
 publisher = RedisPublisher()
 portfolio = PortfolioManager()
 risk_manager = RiskManager(
-    candlestick={},
+    orderbook={},
     portfolio_manager=portfolio
 )
 gateway_instance: BinanceGateway | None = None
@@ -69,7 +69,6 @@ def start_subscriber():
 
     for channel in redis_channels:
         if "candlestick" in channel:
-            subscriber.register_handler(channel, risk_manager.process_candlestick)
             subscriber.register_handler(channel, strategy_instance.update_data)
 
         if "execution" in channel:
@@ -98,9 +97,9 @@ def main():
         strategy_instance = MACDStrategy(symbol, gateway_instance)
 
         while True:
+            orderbook_data = risk_manager.orderbook_records
             price_data = risk_manager.candlestick # candlestick dataframe
             if price_data is not None and len(price_data) != 0:
-                # if len(price_data)>100:
                 logger.info(f"Current Candlestick: {price_data}")
 
                 try:

@@ -29,9 +29,10 @@ class Settings(BaseSettings):
     REDIS_PREFIX: str = "market_data"
 
     # Risk management 
-    MAX_RISK_PER_TRADE_PCT: float = 0.01
+    MAX_RISK_PER_TRADE_PCT: float = 0.01 # 1% risk per trade
     MAX_ABSOLUTE_DRAWDOWN: float = 0.10 # 10% equity
     MAX_RELATIVE_DRAWDOWN: float = 0.05 # 5% daily
+    MAX_SPREAD_PCT: float = 0.003
 
     # Scoring Parameters
     SIGNAL_SCORE_BUY: float = 1.0

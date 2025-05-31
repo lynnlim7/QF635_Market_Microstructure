@@ -52,7 +52,7 @@ def setup_logger(
 
                 # continue with console logging
         logger.setLevel(level)
-        return logger
+    return logger
 
 
 def set_basic_logger(_logger_name: str) -> logging.Logger:

@@ -292,7 +292,7 @@ class BinanceGateway:
                     kline_logger.exception(f"Encountered issue in kline stream processing")
                 
     """
-    Place a limit order for SPOT trading
+    Place a limit order for futures trading
     """
     def place_limit_order(self, side: Side, price, quantity, tif='IOC') -> bool:
         try:
@@ -323,9 +323,7 @@ class BinanceGateway:
         except Exception as e:
             polling_logger.warning("Failed to cancel order: {}, {}".format(order_id, e))
             return False
-
-
-
+        
 
     """ 
     Register a depth callback function that takes one argument: (book: VenueOrderBook) 
