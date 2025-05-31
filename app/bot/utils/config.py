@@ -1,11 +1,16 @@
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
 
+from decimal import getcontext, ROUND_HALF_UP
+
+getcontext().prec = 38  # total digits of precision (like SQL Decimal(38,18))
+getcontext().rounding = ROUND_HALF_UP
 
 class Settings(BaseSettings):
-    BINANCE_TEST_API_KEY: str
-    BINANCE_TEST_API_SECRET: str
+    BINANCE_TEST_API_KEY: str = os.getenv("BINANCE_TESTNET_API_KEY", "")
+    BINANCE_TEST_API_SECRET: str = os.getenv("BINANCE_TESTNET_SECRET_KEY", "")
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parents[2] / ".env",
@@ -41,6 +46,14 @@ class Settings(BaseSettings):
     SIGNAL_SCORE_BUY: float = 1.0
     SIGNAL_SCORE_SELL: float = -1.0
     SIGNAL_SCORE_HOLD: float  = 0
+
+    #PG config
+    APP_PG_HOST: str = os.getenv("APP_PG_HOST", "")
+    APP_PG_USER: str = os.getenv("APP_PG_USER", "")
+    APP_PG_PASSWORD: str = os.getenv("APP_PG_PASSWORD", "")
+    APP_PG_PORT: str = os.getenv("APP_PG_PORT", "5432")
+    APP_PG_DB:str = os.getenv("APP_PG_DB", "postgres")
+
 
 
 

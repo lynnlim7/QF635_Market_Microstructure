@@ -12,9 +12,6 @@ from bot.services.redis_pub import RedisPublisher
 from bot.utils.config import settings
 from bot.utils.logger import setup_logger
 
-# initialize redis pub
-redis_publisher = RedisPublisher(prefix="market_data")
-        
 api_logger = setup_logger(
             logger_name="api",
             logger_path="./logs/api",
@@ -31,10 +28,10 @@ class BinanceApi:
         self._testnet = testnet
 
         # binance async client
-        self._client = Client(self._api_key, self._api_secret, testnet=True)
+        self._client = Client(self._api_key, self._api_secret, testnet=testnet)
 
     """
-    Place a limit order for SPOT trading
+    Place a limit order for FUTURES trading
     """
     def place_limit_order(self, side: Side, price, quantity, tif='IOC') -> bool:
         try:

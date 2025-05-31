@@ -1,0 +1,50 @@
+spot:
+  trade:
+    symbols:
+      - BTCUSDT
+      - BNBUSDT
+      - ETHUSDT
+      - ADAUSDT
+      - DOGEUSDT
+      - SOLUSDT
+      - PEPEUSDT
+      - TRUMPUSDT
+
+  depth10@100ms:
+    symbols:
+      - BTCUSDT
+      - BNBUSDT
+      - ETHUSDT
+      - ADAUSDT
+      - DOGEUSDT
+      - SOLUSDT
+      - PEPEUSDT
+      - TRUMPUSDT
+
+  kline: 
+    intervals :
+      - 1s
+      - 1m
+      - 3m
+      - 5m
+
+    symbols:
+      - BTCUSDT
+      - BNBUSDT
+      - ETHUSDT
+      - ADAUSDT
+      - DOGEUSDT
+      - SOLUSDT
+      - PEPEUSDT
+      - TRUMPUSDT
+
+  bookTicker: 
+    symbols:
+      - BTCUSDT
+      - BNBUSDT
+      - ETHUSDT
+      - ADAUSDT
+      - DOGEUSDT
+      - SOLUSDT
+      - PEPEUSDT
+      - TRUMPUSDT

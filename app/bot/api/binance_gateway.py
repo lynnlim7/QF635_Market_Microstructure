@@ -16,13 +16,13 @@ from binance.ws.depthcache import FuturesDepthCacheManager
 
 from bot.common.interface_book import VenueOrderBook, PriceLevel, OrderBook
 from bot.common.interface_order import OrderEvent, OrderStatus, ExecutionType, Side
-from bot.services.redis_pub import RedisPublisher
+from bot.services import RedisPool
 from bot.utils.config import settings
 from bot.utils.func import get_candlestick_channel, get_execution_channel, get_orderbook_channel
 from bot.utils.logger import setup_logger
 
 # initialize redis pub
-redis_publisher = RedisPublisher(prefix="market_data")
+# redis_publisher = RedisPublisher(prefix="market_data")
 
 orderbook_logger = setup_logger(
             logger_name="orderbook", 
@@ -157,44 +157,43 @@ class BinanceGateway:
         else:
             url = 'wss://fstream.binance.com/ws/' + self._listen_key
 
-        conn = websockets.connect(url)
-        ws = await conn.__aenter__()
-        while ws.open:
-            _message = await ws.recv()
-            # logging.info(_message)
+        async with websockets.connect(url) as ws : 
+            while ws.open:
+                _message = await ws.recv()
+                # logging.info(_message)
 
-            # convert to json
-            _data = json.loads(_message)
-            update_type = _data.get('e')
+                # convert to json
+                _data = json.loads(_message)
+                update_type = _data.get('e')
 
-            if update_type == 'ORDER_TRADE_UPDATE':
-                _trade_data = _data.get('o')
-                _order_id = _trade_data.get('c')
-                _symbol = _trade_data.get('s')
-                _execution_type = _trade_data.get('x')
-                _order_status = _trade_data.get('X')
-                _side = _trade_data.get('S')
-                _last_filled_price = float(_trade_data.get('L'))
-                _last_filled_qty = float(_trade_data.get('l'))
+                if update_type == 'ORDER_TRADE_UPDATE':
+                    _trade_data = _data.get('o')
+                    _order_id = _trade_data.get('c')
+                    _symbol = _trade_data.get('s')
+                    _execution_type = _trade_data.get('x')
+                    _order_status = _trade_data.get('X')
+                    _side = _trade_data.get('S')
+                    _last_filled_price = float(_trade_data.get('L'))
+                    _last_filled_qty = float(_trade_data.get('l'))
 
-                # create an order event
-                _order_event = OrderEvent(_symbol, _order_id, ExecutionType[_execution_type], OrderStatus[_order_status])
-                _order_event.side = Side[_side]
-                if _execution_type == 'TRADE':
-                    _order_event.last_filled_price = _last_filled_price
-                    _order_event.last_filled_quantity = _last_filled_qty
+                    # create an order event
+                    _order_event = OrderEvent(_symbol, _order_id, ExecutionType[_execution_type], OrderStatus[_order_status])
+                    _order_event.side = Side[_side]
+                    if _execution_type == 'TRADE':
+                        _order_event.last_filled_price = _last_filled_price
+                        _order_event.last_filled_quantity = _last_filled_qty
 
-                execution_channel = get_execution_channel(self._symbol)
-                self.publisher.publish(execution_channel, _order_event.to_dict())
-                execution_logger.info(f"Order Trade update: {_order_event.to_dict()}")
-                
-                # notify callbacks
-                if self._execution_callbacks:
+                    execution_channel = get_execution_channel(self._symbol)
+                    self.publisher.publish(execution_channel, _order_event.to_dict())
+                    execution_logger.info(f"Order Trade update: {_order_event.to_dict()}")
+                    
                     # notify callbacks
-                    for _callback in self._execution_callbacks:
-                        _callback(_order_event)
-            else:
-                print(f"random msg: {_data}")
+                    if self._execution_callbacks:
+                        # notify callbacks
+                        for _callback in self._execution_callbacks:
+                            _callback(_order_event)
+                else:
+                    print(f"random msg: {_data}")
 
     async def _listen_kline_forever(self):
         kline_logger.info("Subscribing to kline stream")
@@ -260,11 +259,10 @@ def on_kline(order_event: OrderEvent):
 
 if __name__ == '__main__':
     # create a binance gateway object
+    redis_pool = RedisPool()
+    redis_publisher = redis_pool.create_publisher()
     binance_gateway = BinanceGateway('BTCUSDT', redis_publisher=redis_publisher)
     # register callbacks
     binance_gateway.register_depth_callback(on_orderbook)
     binance_gateway.register_execution_callback(on_execution)
     binance_gateway.register_kline_callback(on_kline)
-            
-            
-

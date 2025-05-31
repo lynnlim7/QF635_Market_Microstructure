@@ -9,8 +9,7 @@ from bot.api.binance_gateway import BinanceGateway
 from bot.portfolio.PortfolioManager import PortfolioManager
 from bot.risk.risk_manager import RiskManager
 from bot.routes import register_routes
-from bot.services.redis_pub import RedisPublisher
-from bot.services.redis_sub import RedisSubscriber
+from bot.services import RedisPool
 from bot.strategy.base_strategy import BaseStrategy
 from bot.strategy.macd_strategy import MACDStrategy
 from bot.utils.config import settings
@@ -28,8 +27,10 @@ redis_channels = [
     # add in other channels 
     ]
 
+redis_pool = RedisPool()
+
 ## redis publisher 
-publisher = RedisPublisher()
+publisher = redis_pool.create_publisher()
 portfolio = PortfolioManager()
 risk_manager = RiskManager(
     candlestick={},
@@ -59,7 +60,7 @@ def handle_execution_updates(data: dict):
 def start_subscriber():
     logger.info("Starting subscriber now")
     ## subscribe to redis channel
-    subscriber = RedisSubscriber(redis_channels)
+    subscriber = redis_pool.create_subscriber(redis_channels)
     # register handler for diff modules
 
     global strategy_instance
