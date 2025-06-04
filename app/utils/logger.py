@@ -4,6 +4,7 @@ import sys
 from datetime import datetime 
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 
+
 def setup_logger(
         logger_name: str,
         logger_path: str,
@@ -67,3 +68,5 @@ def set_basic_logger(_logger_name: str) -> logging.Logger:
     # prevent duplicated logs
     logger.propagate = False
     return logger
+
+main_logger = set_basic_logger("main")

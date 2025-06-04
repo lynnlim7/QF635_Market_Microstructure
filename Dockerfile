@@ -12,4 +12,6 @@ COPY app/ app/
 COPY db/ db/
 COPY models/ models/
 
+EXPOSE 8080
+
 ENV PYTHONPATH=/main

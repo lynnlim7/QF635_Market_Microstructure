@@ -7,6 +7,7 @@ import orjson
 import redis
 import threading
 import pandas as pd
+from app.utils.logger import main_logger
 
  #TODO: explain thought process on take profit/ stop loss - should we sell everything?
 
@@ -25,6 +26,10 @@ class RiskManager:
         self.max_relative_drawdown = max_relative_drawdown
         self.peak_value = None
         self.portfolio_manager = portfolio_manager
+
+
+    def accept_signal(self, signal: int):
+        main_logger.info(f"Received Signal from strategy: {signal}")
 
     # store rolling historical candlestick data as df 
     def process_candlestick(self, data: dict):

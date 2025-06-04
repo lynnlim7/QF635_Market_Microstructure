@@ -6,6 +6,8 @@ from app.strategy.base_strategy import BaseStrategy
 from app.utils.config import settings
 
 from app.utils.logger import setup_logger
+from typing import Callable, List
+from app.utils.logger import main_logger
 
 macd_logger = setup_logger(
             logger_name="macd",
@@ -14,6 +16,7 @@ macd_logger = setup_logger(
             enable_console=False
             )
 
+Callback = Callable[[int], None]
 
 class MACDStrategy(BaseStrategy):
     def __init__(self, symbol: str,
@@ -38,9 +41,15 @@ class MACDStrategy(BaseStrategy):
         self.last_action = None  # Tracks last action: Buy, Sell, or Hold
         self.data = pd.DataFrame()
         self.config = config
+        self._callbacks: List[Callback] = []
 
         self.initialise_data()
         self.print_state()
+
+    def register_callback(self, callback: Callback):
+        main_logger.info(f"registering callback {callback.__name__}")
+        self._callbacks.append(callback)
+        main_logger.info(f"registered callback {callback.__name__}")
 
     def initialise_data(self):
         macd_logger.info("Initialising data now")
@@ -117,7 +126,11 @@ class MACDStrategy(BaseStrategy):
         self.data.loc[self.data.index[-1], 'MACD'] = macd
         self.data.loc[self.data.index[-1], 'Signal_Line'] = signal_line
 
-        self.generate_signal()
+        signal = self.generate_signal()
+        print(f"Signal Generated: {signal}")
+        for callback in self._callbacks:
+            callback(signal)
+
 
     def generate_signal(self) -> int:
         """

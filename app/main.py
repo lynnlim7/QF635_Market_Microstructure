@@ -13,15 +13,14 @@ from app.services import RedisPool
 from app.strategy.base_strategy import BaseStrategy
 from app.strategy.macd_strategy import MACDStrategy
 from app.utils.config import settings
-from app.utils.func import get_execution_channel, get_orderbook_channel
-from app.utils.logger import set_basic_logger
+from app.utils.func import get_execution_channel, get_orderbook_channel, get_candlestick_channel
+from app.utils.logger import main_logger as logger
 
 symbol = settings.SYMBOL
-logger = set_basic_logger("main")
 
 ## list of redis channels
 redis_channels = [
-    get_orderbook_channel(symbol.lower()),
+    get_candlestick_channel(symbol.lower()),
     get_orderbook_channel(symbol.lower()),
     get_execution_channel(symbol.lower())
     # add in other channels 
@@ -68,6 +67,7 @@ def start_subscriber():
     while strategy_instance is None:
         logger.info("Waiting for strategy to start")
         time.sleep(1)
+    logger.info("Strategy loaded")
 
     for channel in redis_channels:
         if "candlestick" in channel:
@@ -84,7 +84,7 @@ def start_subscriber():
 
 def start_flask():
     # global app
-    app.run(debug=True, use_reloader=False, port=8080)  # disable reloader in threaded mode
+    app.run(host="0.0.0.0", debug=True, use_reloader=False, port=8080)  # disable reloader in threaded mode
 
 
 def main():
@@ -95,11 +95,13 @@ def main():
         global strategy_instance
         strategy_instance = MACDStrategy(symbol)
 
+        strategy_instance.register_callback(risk_manager.accept_signal)
+
         while True:
             price_data = risk_manager.candlestick # candlestick dataframe
             if price_data is not None and len(price_data) != 0:
                 # if len(price_data)>100:
-                logger.info(f"Current Candlestick: {price_data}")
+                # logger.info(f"Current Candlestick: {price_data}")
 
                 try:
                     vol = risk_manager.calculate_volatility()
