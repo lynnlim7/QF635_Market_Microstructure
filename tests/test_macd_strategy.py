@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 from binance.client import Client
 
-from bot.api.binance_gateway import BinanceGateway
-from bot.strategy.macd_strategy import MACDStrategy
+from app.api.binance_gateway import BinanceGateway
+from app.strategy.macd_strategy import MACDStrategy
 
 class TestMACDStrategy(unittest.TestCase):
     def setUp(self):
