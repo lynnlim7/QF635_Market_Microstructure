@@ -4,7 +4,7 @@ import os
 import asyncio
 import logging
 
-from bot.datafeeds import KlineTask, TradeTask, SpotDataGateway, BookTickerTask
+from app.datafeeds import KlineTask, TradeTask, SpotDataGateway, BookTickerTask
 import sys
 
 
