@@ -4,24 +4,23 @@ import time
 
 from flask import Flask
 
-from bot.api.binance_api import BinanceApi
-from bot.api.binance_gateway import BinanceGateway
-from bot.portfolio.PortfolioManager import PortfolioManager
-from bot.risk.risk_manager import RiskManager
-from bot.routes import register_routes
-from bot.services import RedisPool
-from bot.strategy.base_strategy import BaseStrategy
-from bot.strategy.macd_strategy import MACDStrategy
-from bot.utils.config import settings
-from bot.utils.func import get_execution_channel, get_orderbook_channel
-from bot.utils.logger import set_basic_logger
+from app.api.binance_api import BinanceApi
+from app.api.binance_gateway import BinanceGateway
+from app.portfolio.portfolio_manager import PortfolioManager
+from app.risk.risk_manager import RiskManager
+from app.routes import register_routes
+from app.services import RedisPool
+from app.strategy.base_strategy import BaseStrategy
+from app.strategy.macd_strategy import MACDStrategy
+from app.utils.config import settings
+from app.utils.func import get_execution_channel, get_orderbook_channel, get_candlestick_channel
+from app.utils.logger import main_logger as logger
 
 symbol = settings.SYMBOL
-logger = set_basic_logger("main")
 
 ## list of redis channels
 redis_channels = [
-    f"{settings.REDIS_PREFIX}:candlestick:{symbol.lower()}",
+    get_candlestick_channel(symbol.lower()),
     get_orderbook_channel(symbol.lower()),
     get_execution_channel(symbol.lower())
     # add in other channels 
@@ -52,7 +51,8 @@ def start_binance() -> None:
 
 # sample to handle, you can do your own
 def handle_order_book_quote(data: dict):
-    logger.info(f"Receiving order book quote from redis!!: {data}")
+    # logger.info(f"Receiving order book quote from redis!!: {data}")
+    return
 
 def handle_execution_updates(data: dict):
     logger.info(f"Receiving execution updates: {data}")
@@ -67,6 +67,7 @@ def start_subscriber():
     while strategy_instance is None:
         logger.info("Waiting for strategy to start")
         time.sleep(1)
+    logger.info("Strategy loaded")
 
     for channel in redis_channels:
         if "candlestick" in channel:
@@ -82,7 +83,7 @@ def start_subscriber():
 
 def start_flask():
     # global app
-    app.run(debug=True, use_reloader=False, port=8080)  # disable reloader in threaded mode
+    app.run(host="0.0.0.0", debug=True, use_reloader=False, port=8080)  # disable reloader in threaded mode
 
 
 def main():
@@ -93,11 +94,14 @@ def main():
         global strategy_instance
         strategy_instance = MACDStrategy(symbol)
 
+        strategy_instance.register_callback(risk_manager.accept_signal)
+
         while True:
             orderbook_data = risk_manager.orderbook_records
             price_data = risk_manager.candlestick # candlestick dataframe
             if price_data is not None and len(price_data) != 0:
-                logger.info(f"Current Candlestick: {price_data}")
+                # if len(price_data)>100:
+                # logger.info(f"Current Candlestick: {price_data}")
 
                 try:
                     vol = risk_manager.calculate_volatility()
