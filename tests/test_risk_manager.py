@@ -3,12 +3,12 @@ import pandas as pd
 import pytest
 import logging
 
-from bot.risk.risk_manager import RiskManager
-from bot.api.binance_gateway import BinanceGateway
-from bot.portfolio.PortfolioManager import PortfolioManager
-from bot.strategy.macd_strategy import MACDStrategy
+from app.bot.risk.risk_manager import RiskManager
+from app.bot.api.binance_gateway import BinanceGateway
+from app.bot.portfolio.PortfolioManager import PortfolioManager
+from app.bot.strategy.macd_strategy import MACDStrategy
 
-from bot.utils.config import settings
+from app.bot.utils.config import settings
 
 
 @pytest.fixture

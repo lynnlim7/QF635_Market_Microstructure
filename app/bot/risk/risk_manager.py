@@ -7,11 +7,11 @@ import numpy as np
 import pandas as pd
 
 from binance.client import Client
-from bot.portfolio.PortfolioManager import PortfolioManager
-from bot.strategy.macd_strategy import MACDStrategy
-from bot.api.binance_gateway import BinanceGateway
-from bot.utils.logger import setup_logger
-from bot.utils.config import settings
+from app.bot.portfolio.PortfolioManager import PortfolioManager
+from app.bot.strategy.macd_strategy import MACDStrategy
+from app.bot.api.binance_gateway import BinanceGateway
+from app.bot.utils.logger import setup_logger
+from app.bot.utils.config import settings
 
 
 #TODO: explain thought process on take profit/ stop loss - should we sell everything? or pause trading
@@ -165,7 +165,7 @@ class RiskManager:
         signal_score = self.trade_signal.generate_signal()
         signal_direction = self.trade_direction(signal_score)
 
-        if signal_score == "HOLD":
+        if signal_direction == "HOLD":
             risk_logger.info("No entry signal.")
             return 
         
