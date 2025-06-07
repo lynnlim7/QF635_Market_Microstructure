@@ -1,33 +1,29 @@
-from binance.client import Client
-from app.portfolio.portfolio_manager import PortfolioManager
-from app.utils.logger import setup_logger
-from app.utils.config import settings
 import numpy as np 
 import pandas as pd
+from app.utils.logger import setup_logger
+from app.utils.config import settings
 from app.utils.logger import main_logger
-
 from binance.client import Client
-from app.bot.portfolio.PortfolioManager import PortfolioManager
-from app.bot.strategy.macd_strategy import MACDStrategy
-from app.bot.api.binance_gateway import BinanceGateway
-from app.bot.utils.logger import setup_logger
-from app.bot.utils.config import settings
-
+from app.portfolio.portfolio_manager import PortfolioManager
+from app.strategy.macd_strategy import MACDStrategy
+from app.api.binance_gateway import BinanceGateway
+from app.api.binance_api import BinanceApi
 
 #TODO: explain thought process on take profit/ stop loss - should we sell everything? or pause trading
 #TODO: listen to depth order book and take the mid price from best bid and ask
 #TODO : dynamic take profit and stop loss - adjust take profit and stop loss pct based on market vol (multiples of ATR)
+#TODO : rolling entropy to qc signal 
 
 risk_logger = setup_logger(
             logger_name="risk",
             logger_path="./logs/risk",
             log_type="risk",
             enable_console=False
-)
+            )
 
 class RiskManager:
     def __init__(self, 
-                 api:BinanceGateway,
+                 api:BinanceApi,
                  portfolio_manager:PortfolioManager,
                  trade_signal: MACDStrategy,
                  trade_direction: MACDStrategy,
@@ -35,7 +31,6 @@ class RiskManager:
                  max_absolute_drawdown:float = settings.MAX_ABSOLUTE_DRAWDOWN,
                  max_relative_drawdown:float = settings.MAX_RELATIVE_DRAWDOWN, 
                  ):
-        # self.symbol = symbol
         self.orderbook_df = pd.DataFrame()
         self.candlestick_df= pd.DataFrame()
         self.api = api
@@ -69,72 +64,79 @@ class RiskManager:
             "spread_pct": spread_pct
         }]).set_index("timestamp")
         
-        self.orderbook_df = pd.concat([self.orderbook_df, row]).tail(500)
+        self.orderbook_df = pd.concat([self.orderbook_df, row]).tail(500) # take latest 500
 
-
-<<<<<<< HEAD:app/bot/risk/risk_manager.py
-    # store rolling historical candlestick data as df - log returns and volatility
-=======
+    # callback function from strategy - takes signal from queue
     def accept_signal(self, signal: int):
         main_logger.info(f"Received Signal from strategy: {signal}")
 
+    # dynamic calculation of volatility adapted to mkt conditions
+    def calculate_rolling_vol(self, window: int = 21):
+        if len(self.orderbook_df)>1:
+            log_returns = np.log(self.orderbook_df['mid_price']).diff()
+            if log_returns.empty:
+                return None
+            self.rolling_vol = log_returns.rolling(window=window, min_periods=1).std() * np.sqrt(252)
+            self.current_vol = self.rolling_vol.iloc[-1] if not self.rolling_vol.empty else None
+            return self.current_vol
+        return None
+
     # store rolling historical candlestick data as df 
->>>>>>> a3baa743540794271f12111ebbe633864912e399:app/risk/risk_manager.py
     def process_candlestick(self, data: dict):
         risk_logger.info("Fetching live candlestick data..")
+        if not data.get("is_closed", False):
+            risk_logger.debug("Received incomplete candlestick. Skipping.")
+            return
+
+        risk_logger.info("Processing closed candlestick...")
         data['datetime'] = pd.to_datetime(data['start_time'], unit='ms')
         row = pd.DataFrame([data]).set_index('datetime')
             
-        if self.candlestick.empty:
-            self.candlestick = row
+        if self.candlestick_df.empty:
+            self.candlestick_df = row
         else: 
             timestamp = row.index[0]
-            if timestamp not in self.candlestick.index:
-                self.candlestick_df = pd.concat([self.candlestick_df, row])
+            if timestamp not in self.candlestick_df.index:
+                self.candlestick_df = pd.concat([self.candlestick_df, row]).tail(500)
             else:
                 self.candlestick_df.loc[data['datetime']] = row.iloc[0]
-            
-
-    # # realized vol
-    # def calculate_volatility(self):
-    #     print(f"Start calculating volatility..")
-    #     close = self.candlestick_df['close']
-    #     if len(close)>2:
-    #         daily_return = np.log(close/close.shift(1)).dropna()
-    #         std_dev = daily_return.rolling(window=30, min_periods=1).std()
-    #         volatility = std_dev.iloc[-1]*np.sqrt(252)
-    #         return volatility
-    #     print(f"Not enough close prices..")
-
 
     # average true range - measure price vol of asset approx 14 days 
     def calculate_atr(self, period=14):
+        if self.candlestick_df.empty:
+            risk_logger.warning("No candlestick data available for ATR calculations.")
+            return None 
+        
         close = self.candlestick_df['close']
         high = self.candlestick_df['high']
         low = self.candlestick_df['low']
         prev_close = close.shift(1)
         high_low = high - low
-        high_close = abs(high-prev_close)
-        low_close = abs(low-prev_close)
+        high_close = abs(high - prev_close)
+        low_close = abs(low - prev_close)
         true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        atr = true_range.rolling(window=period).mean()
+
+        atr = true_range.rolling(window=period, min_periods=1).mean()
         return atr
 
     # dynamic position size 
     def calculate_position_size(self):
-        # risk amount is a fixed pct of capital
-        capital = self.portfolio_manager.get_cash()
-        risk_amount = capital * self.max_risk_per_trade_pct
         atr = self.calculate_atr()
+        if atr is None or atr.empty:
+            risk_logger.warning("Unable to calculate ATR, using capital as default position size.")
+            return self.portfolio_manager.get_cash()
+        
         # one pos size per trade 
         latest_atr = atr.dropna().iloc[-1] 
+        current_vol = self.calculate_rolling_vol()
+        capital = self.portfolio_manager.get_cash()
+        risk_amount = capital * self.max_risk_per_trade_pct
         position_size = risk_amount / latest_atr
-        print(f"Position size:{position_size}")
         return position_size
     
     ## total portfolio risk
     def calculate_drawdown_limits(self, current_prices:dict, order) -> bool:
-        current_value = self.get_total_portfolio_value(current_prices)
+        current_value = self.portfolio_manager.get_total_portfolio_value(current_prices)
         if self.initial_value is None:
             self.initial_value = current_value # initial portfolio value 
         if self.peak_value is None or current_value>self.peak_value:
@@ -164,13 +166,14 @@ class RiskManager:
         if trade_direction == "LONG":
             stop_loss = entry_price - sl_multi * atr
             take_profit = entry_price + sl_multi * atr
-        if trade_direction == "SHORT":
+        elif trade_direction == "SHORT":
             stop_loss = entry_price + sl_multi * atr
             take_profit = entry_price - sl_multi * atr 
+        return take_profit, stop_loss
 
     def entry_position(self, current_price:float, current_prices:dict, api):
         signal_score = self.trade_signal.generate_signal()
-        signal_direction = self.trade_direction(signal_score)
+        signal_direction = self.trade_directions(signal_score)
 
         if signal_direction == "HOLD":
             risk_logger.info("No entry signal.")

@@ -52,11 +52,11 @@ def setup_logger(
                 logger.error(f"Failed to set up file logging: {str(file_error)}")
 
                 # continue with console logging
-        logger.setLevel(level)
+    logger.setLevel(level)
 
-        # prevent it from writing into the higher leve
-        logger.propagate = False
-        return logger
+    # prevent it from writing into the higher leve
+    logger.propagate = False
+    return logger
 
 
 def set_basic_logger(_logger_name: str) -> logging.Logger:
