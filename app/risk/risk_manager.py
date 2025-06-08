@@ -8,6 +8,7 @@ from app.portfolio.portfolio_manager import PortfolioManager
 from app.strategy.macd_strategy import MACDStrategy
 from app.api.binance_gateway import BinanceGateway
 from app.api.binance_api import BinanceApi
+from app.services.circuit_breaker import RedisCircuitBreaker
 
 #TODO: explain thought process on take profit/ stop loss - should we sell everything? or pause trading
 #TODO: listen to depth order book and take the mid price from best bid and ask
@@ -24,6 +25,7 @@ risk_logger = setup_logger(
 class RiskManager:
     def __init__(self, 
                  api:BinanceApi,
+                 circuit_breaker: RedisCircuitBreaker,
                  portfolio_manager:PortfolioManager,
                  trade_signal: MACDStrategy,
                  trade_direction: MACDStrategy,
@@ -34,6 +36,7 @@ class RiskManager:
         self.orderbook_df = pd.DataFrame()
         self.candlestick_df= pd.DataFrame()
         self.api = api
+        self.circuit_breaker = circuit_breaker
         self.initial_value = None
         self.max_risk_per_trade_pct = max_risk_per_trade_pct
         self.max_absolute_drawdown = max_absolute_drawdown
@@ -146,7 +149,7 @@ class RiskManager:
         absolute_dd = (self.initial_value - current_value)/ current_value
         
         if relative_dd > self.max_relative_drawdown or absolute_dd > self.max_absolute_drawdown:
-            print(f"Drawdown threshold breached")
+            risk_logger.warning(f"Drawdown limits breached.")
             for symbol, position in PortfolioManager.get_positions.items():
                 qty = position['qty']
                 # place market sell order - liquidate assets

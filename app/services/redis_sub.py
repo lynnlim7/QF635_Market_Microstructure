@@ -11,6 +11,7 @@ import redis.asyncio as aredis
 
 from app.utils.config import settings
 from app.utils.logger import set_basic_logger
+from app.services.circuit_breaker import RedisCircuitBreaker
 
 logger = set_basic_logger("redis_sub")
 
@@ -22,10 +23,12 @@ class RedisSubscriber:
     def __init__(
             self, 
             pool: redis.ConnectionPool,
-            channels: list[str]
+            channels: list[str],
+            circuit_breaker = RedisCircuitBreaker,
         ):
-        self.redis_client = redis.Redis.from_pool(pool)
-        self.pubsub = self.redis_client.pubsub() 
+        self.redis = redis.Redis.from_pool(pool)
+        self.pubsub = self.redis.pubsub() 
+        self.circuit_breaker = circuit_breaker
         self.pubsub.subscribe(*channels) # subscribe to multiple redis channels
         self.redis_handlers = defaultdict(list) # initialize dict to map to list of callback funcs 
     

@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     SIGNAL_SCORE_SELL: float = -1.0
     SIGNAL_SCORE_HOLD: float  = 0
 
+    # Kill Switch
+    ACTIVATE_KILL_SWITCH = False 
+
     #PG config
     APP_PG_HOST: str = os.getenv("APP_PG_HOST", "")
     APP_PG_USER: str = os.getenv("APP_PG_USER", "")

@@ -7,6 +7,7 @@ import logging
 import orjson
 import redis
 import redis.asyncio as aredis
+from app.services.circuit_breaker import RedisCircuitBreaker
 
 from app.utils.config import settings
 
@@ -19,16 +20,22 @@ class RedisPublisher:
     def __init__(
             self,
             pool : redis.ConnectionPool,
-            prefix = settings.REDIS_PREFIX
+            circuit_breaker: RedisCircuitBreaker,
+            prefix = settings.REDIS_PREFIX,
             ):
         self.redis = redis.Redis.from_pool(pool)
         self.prefix = prefix
+        self.circuit_breaker = circuit_breaker
         
     def create_channel(self, channel:str) -> str:
         return channel
     
     def publish(self, channel:str, data):
         try:
+            if not self.circuit_breaker.allow_request():
+                logging.warning(f"Circuit breaker is open - stop publishing to {channel}")
+                return
+
             redis_key = self.create_channel(channel)
             logging.info(f"Publishing to channel: {redis_key} with data: {data}")
 
