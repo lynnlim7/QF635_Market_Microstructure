@@ -150,10 +150,19 @@ class RiskManager:
         
         if relative_dd > self.max_relative_drawdown or absolute_dd > self.max_absolute_drawdown:
             risk_logger.warning(f"Drawdown limits breached.")
+            self.circuit_breaker.force_open(f"Drawdown limit breached. Relative dd: {relative_dd:.2%}, Absolute dd: {absolute_dd:.2%}.")
             for symbol, position in PortfolioManager.get_positions.items():
                 qty = position['qty']
+                try:
+                    self.api.place_limit_order(
+                        side="SELL",
+                        qty=qty,
+                        symbol=symbol
+                    )
                 # place market sell order - liquidate assets
-                order = Client.order_market_sell(symbol, qty)
+                    risk_logger.info(f"Liquidated position for {symbol}:{qty} units.")
+                except Exception as e:
+                    risk_logger.error(f"Unable to liquidate position for {symbol}: {e}.")
             return False
         else:
             return True 
