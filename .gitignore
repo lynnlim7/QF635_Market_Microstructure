@@ -9,6 +9,7 @@ poetry.lock
 
 # Python bytecode 
 __pycache__/
+.pytest_cache
 
 # pycharm utils
 .idea

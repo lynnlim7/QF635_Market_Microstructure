@@ -32,8 +32,10 @@ redis_pool = RedisPool()
 publisher = redis_pool.create_publisher()
 portfolio = PortfolioManager()
 risk_manager = RiskManager(
-    candlestick={},
-    portfolio_manager=portfolio
+    api=BinanceApi,
+    portfolio_manager=portfolio,
+    trade_signal=MACDStrategy(symbol),
+    trade_direction=MACDStrategy(symbol)
 )
 
 gateway_instance: BinanceGateway | None = None
@@ -71,7 +73,6 @@ def start_subscriber():
 
     for channel in redis_channels:
         if "candlestick" in channel:
-            subscriber.register_handler(channel, risk_manager.process_candlestick)
             subscriber.register_handler(channel, strategy_instance.update_data)
 
         if "execution" in channel:
@@ -98,13 +99,14 @@ def main():
         strategy_instance.register_callback(risk_manager.accept_signal)
 
         while True:
-            price_data = risk_manager.candlestick # candlestick dataframe
+            orderbook_data = risk_manager.orderbook_df
+            price_data = risk_manager.candlestick_df# candlestick dataframe
             if price_data is not None and len(price_data) != 0:
                 # if len(price_data)>100:
                 # logger.info(f"Current Candlestick: {price_data}")
 
                 try:
-                    vol = risk_manager.calculate_volatility()
+                    vol = risk_manager.calculate_rolling_vol()
                     if vol is not None:
                         print(f"Volatility: {vol:.4f}")
                     else:

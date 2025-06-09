@@ -3,6 +3,7 @@ from flask import jsonify, request
 from app.api.binance_api import BinanceApi
 from app.common.interface_order import Side
 
+#TODO : implement kill switch route  
 
 def register_routes(app, binance_api:BinanceApi):
     @app.get("/")

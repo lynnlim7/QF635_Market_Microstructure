@@ -4,6 +4,7 @@ import redis.asyncio as aredis
 from app.utils.config import settings
 from app.services.redis_pub import RedisPublisher, RedisAsyncPublisher
 from app.services.redis_sub import RedisSubscriber
+from app.services.circuit_breaker import RedisCircuitBreaker
 from typing import Union
 
 __all__ = [
@@ -35,6 +36,14 @@ class RedisPool :
                 db=db,
                 decode_responses=decode_responses
             )
+        self._circuit_breaker = None
+
+    def create_circuit_breaker(self) -> RedisCircuitBreaker:
+        if self._circuit_breaker is None:
+            redis_client = redis.Redis.from_pool(self.pool)
+            self._circuit_breaker = RedisCircuitBreaker(redis_client)
+        return self._circuit_breaker
+
 
     def create_publisher(self, prefix : str ="") -> Union[RedisPublisher, RedisAsyncPublisher] :
         if self.async_pool :
