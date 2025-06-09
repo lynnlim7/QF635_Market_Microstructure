@@ -12,6 +12,7 @@ from app.routes import register_routes
 from app.services import RedisPool
 from app.strategy.base_strategy import BaseStrategy
 from app.strategy.macd_strategy import MACDStrategy
+from queue.signalqueue import SignalQueue
 from app.utils.config import settings
 from app.utils.func import get_execution_channel, get_orderbook_channel, get_candlestick_channel
 from app.utils.logger import main_logger as logger
@@ -44,6 +45,9 @@ binance_api = BinanceApi(settings.SYMBOL)
 
 app = Flask(__name__)
 register_routes(app, binance_api)
+
+# Create global signal queue
+signal_queue = SignalQueue()
 
 def start_binance() -> None:
     logger.info("Starting binance now")
@@ -87,6 +91,18 @@ def start_flask():
     # global app
     app.run(host="0.0.0.0", debug=True, use_reloader=False, port=8080)  # disable reloader in threaded mode
 
+# Intermediate callback to push signals into the queue
+def signal_callback(signal: int):
+    logger.info(f"Signal pushed to queue: {signal}")
+    signal_queue.push(signal)
+
+def signal_consumer_loop():
+    while True:
+        if not signal_queue.is_empty():
+            signal = signal_queue.pop()
+            if signal is not None:
+                risk_manager.accept_signal(signal)
+        time.sleep(1) 
 
 def main():
     logger.info(f"Start trading..")
@@ -95,8 +111,9 @@ def main():
     try:
         global strategy_instance
         strategy_instance = MACDStrategy(symbol)
-
-        strategy_instance.register_callback(risk_manager.accept_signal)
+        strategy_instance.register_callback(signal_callback)
+        ##Lynn: may not need this part
+        #strategy_instance.register_callback(risk_manager.accept_signal)
 
         while True:
             orderbook_data = risk_manager.orderbook_df

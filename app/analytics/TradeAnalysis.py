@@ -89,7 +89,46 @@ class TradeAnalysis:
 
     def calculate_average_pnl(self):
         #Placeholder, change with how df looks later
-        return self.df['pnl'].mean()
+        if self.df.empty:
+            return {'total_unrealized_pnl': 0, 'assets': {}}
+        # Convert to numeric types
+        self.df['quantity'] = pd.to_numeric(self.df['quantity'])
+        self.df['price'] = pd.to_numeric(self.df['price'])
+        
+        results = {'assets': {}, 'total_realized_pnl': 0}
+        
+        for asset, asset_df in self.df.groupby('asset'):
+
+            # Weighted Average Cost method
+            buys = asset_df[asset_df['quantity'] > 0]
+            sells = asset_df[asset_df['quantity'] < 0]
+            
+            if buys.empty or sells.empty:
+                continue
+                
+            # Calculate weighted average buy price
+            total_buy_qty = buys['quantity'].sum()
+            weighted_avg_buy = (buys['quantity'] * buys['price']).sum() / total_buy_qty
+            
+            # Calculate realized PnL for each sell trade
+            realized_pnl = 0
+            for _, sell in sells.iterrows():
+                sell_qty = abs(sell['quantity'])
+                sell_price = sell['price']
+                
+                # PnL = (Sell Price - Avg Buy Price) * Quantity Sold
+                realized_pnl += (sell_price - weighted_avg_buy) * sell_qty
+            
+            results['assets'][asset] = {
+                'realized_pnl': realized_pnl,
+                'weighted_avg_cost': weighted_avg_buy,
+                'total_bought': total_buy_qty,
+                'total_sold': abs(sells['quantity'].sum())
+            }
+            results['total_realized_pnl'] += realized_pnl
+ 
+        return results
+
     
     ###unrealized pnl###
     ##can choose between FIFO or weighted average cost
