@@ -44,17 +44,17 @@ class RedisCircuitBreaker:
         current_timestamp = int(time.time())
         latest_failure = int(self.redis.get(self.failure_timestamp))
 
-        if self.get_state == "closed":
+        if self.get_state() == "closed":
             return True 
         
-        if self.get_state == "open":
+        if self.get_state() == "open":
             if (current_timestamp - latest_failure) >= self.reset_timeout:
                 return True
             return False
 
     # successful calls, reset failure count
     def record_success(self):
-        if self.get_state == "open":
+        if self.get_state() == "open":
             return 
         
         success_count = self.redis.incr(self.success_count)

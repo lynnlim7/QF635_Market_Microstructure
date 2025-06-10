@@ -1,60 +1,67 @@
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, Integer, Boolean, Enum, DateTime, Numeric, func, ForeignKey
-from models import Base
-from sqlalchemy.dialects import postgresql
+import enum
 import os
 
-import enum
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    Numeric,
+    String,
+)
+from sqlalchemy.dialects import postgresql
+
+from models import Base
 
 __all__ = [
     "FuturesOrders",
-    "SpotOrders",
+    "OrderStatus",
+    "OrderType",
+    "OrderSide",
+    "OrderTimeInForce",
+    "ExecutionType"
 ]
 
 DEFAULT_SCHEMA = "trading_app"
 schema = os.environ.get("APP_SCHEMA", DEFAULT_SCHEMA)
 
+class ExecutionType(enum.Enum):
+    """
+    Status of an order in its lifecycle.
+
+    - Refer to for complete list of values: https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Event-Order-Update
+    """
+    NEW = "NEW"
+    CANCELED = "CANCELED"
+    CALCULATED = "CALCULATED"
+    TRADE = "TRADE"
+    EXPIRED = "EXPIRED"
+    AMENDMENT = "AMENDMENT"
+
+
+
 class OrderStatus(enum.Enum):
     """
     Status of an order in its lifecycle.
 
-    - OPEN: Order is open and waiting to be filled.
-    - PENDING: Order is submitted but not yet acknowledged by the exchange.
-    - PARTIALLY_FILLED: Order has been partially filled.
-    - FILLED: Order has been fully filled.
-    - REJECTED: Order was rejected and will not be executed.
-    - EXPIRED: Order was not filled within its time-in-force and expired.
+    - Refer to for complete list of values: https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Event-Order-Update
     """
-    OPEN = "open"
-    PENDING = "pending"
-    PARTIALLY_FILLED = "partially_filled"
-    FILLED = "filled"
-    REJECTED = "rejected"
-    EXPIRED = "expired"
+    NEW = "NEW"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    CANCELED = "CANCELED"
+    EXPIRED = "EXPIRED"
+    EXPIRED_IN_MATCH = "EXPIRED_IN_MATCH" #not sure whats this
 
 
 class OrderType(enum.Enum):
     """
     Type of order execution logic.
 
-    - LIMIT: Executes at a specific price or better.
-    - MARKET: Executes immediately at the best available price.
-    - STOP_LOSS: Triggers a market order once a stop price is reached.
-    - STOP_LIMIT: Triggers a limit order once a stop price is reached.
-    - TAKE_PROFIT: Triggers a market order when a target profit price is reached.
-    - TAKE_PROFIT_LIMIT: Triggers a limit order when a target profit price is reached.
-    - LIMIT_MAKER: A limit order that will only post to the order book (maker only).
-    - OCO: One Cancels the Other — a pair of linked orders where the execution of one cancels the other.
+    - Refer to for complete list of values: https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Event-Order-Update
     """
     LIMIT = "LIMIT"
     MARKET = "MARKET"
-    STOP_LOSS = "STOP_LOSS"
-    STOP_LIMIT = "STOP_LIMIT"
     TAKE_PROFIT = "TAKE_PROFIT"
-    TAKE_PROFIT_LIMIT = "TAKE_PROFIT_LIMIT"
-    LIMIT_MAKER = "LIMIT_MAKER"
-    OCO = "OCO"
-    # Futures
     STOP = "STOP"
     STOP_MARKET = "STOP_MARKET"
     TAKE_PROFIT_MARKET = "TAKE_PROFIT_MARKET"
@@ -86,36 +93,56 @@ class OrderTimeInForce(enum.Enum) :
 class OrdersMixin :
     __abstract__ = True
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    pair_id = Column(Integer, ForeignKey("futures_pairs.id"), nullable=False)
-    filled = Column(Numeric(precision=38, scale=10), nullable=False)
-    submitted_at = Column(DateTime(timezone=False), nullable=False)
-    updated_at = Column(DateTime(timezone=False), nullable=False, default=func.now())
-    limit_price = Column(Numeric(precision=38, scale=10))
-    filled_price = Column(Numeric(precision=38, scale=10), nullable=False)
-    amount = Column(Numeric(precision=38, scale=10), nullable=False)
-    side = Column(postgresql.ENUM(OrderSide, name="orderside", native_enum=True, create_type=False, schema=schema), nullable=False)
-    time_in_force = Column(postgresql.ENUM(OrderTimeInForce, name="ordertimeinforce", native_enum=True, create_type=False, schema=schema))
-    status = Column(postgresql.ENUM(OrderStatus, name="orderstatus", schema=schema, create_type=False), nullable=False)
-    type = Column(postgresql.ENUM(OrderType, name="ordertype", native_enum=True, create_type=False, schema=schema))
-    closed_time = Column(DateTime)
-    expired_at = Column(DateTime)
+    # primary key – Binance order id is unique per account
+    order_id = Column(BigInteger, primary_key=True)
+
+    # identifiers & symbol
+    client_order_id = Column(String(64), nullable=False)
+    symbol          = Column(String(16), nullable=False)        # e.g. BTCUSDT
+
+    # lifecycle enums
+    side            = Column(
+        postgresql.ENUM(OrderSide, name="orderside", schema=schema, native_enum=True, create_type=False),
+        nullable=False,
+    )
+    position_side   = Column(String(8), nullable=False)         # LONG / SHORT / BOTH
+    exec_type       = Column(
+        postgresql.ENUM(ExecutionType, name="executiontype", schema=schema, create_type=False),
+        nullable=False,
+    )
+    status          = Column(
+        postgresql.ENUM(OrderStatus, name="orderstatus", schema=schema, create_type=False),
+        nullable=False,
+    )
+    order_type      = Column(
+        postgresql.ENUM(OrderType, name="ordertype", schema=schema, create_type=False),
+        nullable=False,
+    )
+    time_in_force   = Column(
+        postgresql.ENUM(OrderTimeInForce, name="ordertimeinforce", schema=schema, create_type=False),
+        nullable=True,
+    )
+
+    # quantities / prices ----------------------------------------------------
+    orig_qty       = Column(Numeric(38, 10), nullable=False)
+    cum_filled_qty = Column(Numeric(38, 10), nullable=False)
+    avg_price      = Column(Numeric(38, 10))
+    last_qty       = Column(Numeric(38, 10), nullable=False)
+    last_price     = Column(Numeric(38, 10))
+    commission     = Column(Numeric(38, 10), nullable=False)
+    commission_asset = Column(String(12))
+    realized_pnl     = Column(Numeric(38, 10), nullable=False)
+
+    # trailing / stop fields -------------------------------------------------
+    stop_price       = Column(Numeric(38, 10))
+    activation_price = Column(Numeric(38, 10))
+    callback_rate    = Column(Numeric(38, 10))
+
+    # misc flags & raw timestamps -------------------------------------------
+    is_maker      = Column(Boolean, nullable=False, default=False)
+    event_time_ms = Column(BigInteger, nullable=False)
+    trade_time_ms = Column(BigInteger, nullable=False)
 
 class FuturesOrders(Base, OrdersMixin) : 
-    __tablename__= "futures_orders"
+    __tablename__= "futures_order"
 
-    leverage = Column(Integer, nullable=False)
-
-
-# class FuturesTrades(Base) : 
-#     __tablename__ = "futures_trades"
-#     id = Column(Integer, primary_key=True)
-#     trade_id = Column(Integer, ForeignKey("futures_orders.id"), nullable=False)
-#     submit_time = Column(DateTime, nullable=False)
-#     closed_time = Column(DateTime, nullable=False)
-#     amount = Column(Numeric(precision=38, scale=18), nullable=False)
-#     filled_price = Column(Numeric(precision=38, scale=18), nullable=False)
-#     type = Column(Enum(OrderType))
-
-class SpotOrders(Base, OrdersMixin) : 
-    __tablename__= "spot_orders"
