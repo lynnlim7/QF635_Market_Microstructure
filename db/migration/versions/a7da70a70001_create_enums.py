@@ -20,36 +20,60 @@ depends_on: Union[str, Sequence[str], None] = None
 DEFAULT_SCHEMA = "trading_app"
 schema = os.environ.get("APP_SCHEMA", DEFAULT_SCHEMA)
 
-def upgrade() -> None:
-    order_side = sa.Enum('BUY', 'SELL', name='orderside', schema=schema)
-    order_side.create(op.get_bind(), checkfirst=True)
+ENUMS: dict[str, tuple[str, ...]] = {
+    # models.trades.OrderSide
+    "orderside": ("BUY", "SELL"),
 
-    order_type = sa.Enum(
-        'LIMIT', 'MARKET', 'STOP_LOSS', 'STOP_LIMIT',
-        'TAKE_PROFIT', 'TAKE_PROFIT_LIMIT', 'LIMIT_MAKER', 'OCO',
-        name='ordertype',
-        schema=schema
+    # models.OrderType
+    "ordertype": (
+        "LIMIT",
+        "MARKET",
+        "TAKE_PROFIT",
+        "STOP",
+        "STOP_MARKET",
+        "TAKE_PROFIT_MARKET",
+        "TRAILING_STOP_MARKET",
+    ),
+
+    # models.OrderTimeInForce
+    "ordertimeinforce": ("GTC", "IOC", "FOK", "GTX", "GTD"),
+
+    # models.OrderStatus
+    "orderstatus": (
+        "NEW",
+        "PARTIALLY_FILLED",
+        "FILLED",
+        "CANCELED",
+        "EXPIRED",
+        "EXPIRED_IN_MATCH",
+    ),
+
+    # models.ExecutionType
+    "executiontype": (
+        "NEW",
+        "CANCELED",
+        "CALCULATED",
+        "TRADE",
+        "EXPIRED",
+        "AMENDMENT",
+    ),
+}
+
+def _create_enum(name: str, values: tuple[str, ...]) -> None:
+    sa.Enum(*values, name=name, schema=schema).create(
+        op.get_bind(), checkfirst=True
     )
-    order_type.create(op.get_bind(), checkfirst=True)
 
-    order_time_in_force = sa.Enum('GTC', 'IOC', 'FOK', name='ordertimeinforce', schema=schema)
-    order_time_in_force.create(op.get_bind(), checkfirst=True)
+def _drop_enum(name: str) -> None:
+    sa.Enum(name=name, schema=schema).drop(
+        op.get_bind(), checkfirst=True
+    )
 
-    order_status = sa.Enum("open", "pending", "partially_filled", 
-                           "filled", "rejected", "expired", 
-                           name="orderstatus", schema=schema)
-    order_status.create(op.get_bind(), checkfirst=True)
-
+def upgrade() -> None:
+    for name, values in ENUMS.items():
+        _create_enum(name, values)
 
 def downgrade() -> None:
-    order_type = sa.Enum(name='ordertype', schema=schema)
-    order_type.drop(op.get_bind(), checkfirst=True)
-
-    order_side = sa.Enum(name='orderside', schema=schema)
-    order_side.drop(op.get_bind(), checkfirst=True)
-
-    order_time_in_force = sa.Enum(name='ordertimeinforce', schema=schema)
-    order_time_in_force.drop(op.get_bind(), checkfirst=True)
-
-    order_status = sa.Enum(name='orderstatus', schema=schema)
-    order_status.drop(op.get_bind(), checkfirst=True)
+    # drop in reverse order to satisfy dependencies
+    for name in reversed(list(ENUMS.keys())):
+        _drop_enum(name)

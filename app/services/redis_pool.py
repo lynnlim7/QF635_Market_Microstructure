@@ -21,7 +21,7 @@ class RedisPool :
             async_pool=False,
     ):
         self.async_pool = async_pool
-        
+
         if async_pool : 
             self.pool = aredis.ConnectionPool(
                 host=host,
@@ -41,7 +41,7 @@ class RedisPool :
     def create_circuit_breaker(self) -> RedisCircuitBreaker:
         if self._circuit_breaker is None:
             redis_client = redis.Redis.from_pool(self.pool)
-            self._circuit_breaker = RedisCircuitBreaker(redis_client)
+            self._circuit_breaker = RedisCircuitBreaker(redis_client.connection_pool)
         return self._circuit_breaker
 
 
@@ -49,8 +49,12 @@ class RedisPool :
         if self.async_pool :
             return RedisAsyncPublisher.from_pool(self.pool)
         else :
-            return RedisPublisher.from_pool(self.pool)
+            return RedisPublisher.from_pool(self.pool, self._circuit_breaker)
         
 
     def create_subscriber(self, channels) -> RedisSubscriber :
         return RedisSubscriber.from_pool(self.pool, channels)
+
+    @property
+    def circuit_breaker(self):
+        return self._circuit_breaker

@@ -24,13 +24,18 @@ services:
       - .env
     volumes:
       - ./pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "${APP_PG_USER}", "-d", "${APP_PG_DB}" ]
+      interval: 5s
+      retries: 5
 
   db-migrator:
     build:
       context: .
     command: ["./db/migrate.sh"]
-    depends_on: 
-      - postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
     env_file:
       - .env
     restart: "no"

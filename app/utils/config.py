@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     SIGNAL_SCORE_HOLD: float  = 0
 
     # Kill Switch
-    ACTIVATE_KILL_SWITCH = False 
+    ACTIVATE_KILL_SWITCH: bool = False
 
     #PG config
     APP_PG_HOST: str = os.getenv("APP_PG_HOST", "")
