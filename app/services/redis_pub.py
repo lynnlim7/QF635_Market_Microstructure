@@ -56,7 +56,7 @@ class RedisPublisher:
         self._close()
 
     @classmethod
-    def from_pool(cls, pool, circuit_breaker: RedisCircuitBreaker = None) : 
+    def from_pool(cls, pool, circuit_breaker) :
         return cls(pool, circuit_breaker)
 
 
@@ -96,8 +96,8 @@ class RedisAsyncPublisher :
             logging.error(f"Failed to publish: {e}")
 
     @classmethod
-    def from_pool(cls, pool, circuit_breaker: RedisCircuitBreaker = None) : 
-        return cls(pool, circuit_breaker)
+    def from_pool(cls, pool) :
+        return cls(pool)
 
 
 

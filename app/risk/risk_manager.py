@@ -25,10 +25,10 @@ risk_logger = setup_logger(
 class RiskManager:
     def __init__(self, 
                  api:BinanceApi,
-                 circuit_breaker: RedisCircuitBreaker,
                  portfolio_manager:PortfolioManager,
                  trade_signal: MACDStrategy,
                  trade_direction: MACDStrategy,
+                 circuit_breaker: RedisCircuitBreaker,
                  max_risk_per_trade_pct:float = settings.MAX_RISK_PER_TRADE_PCT, 
                  max_absolute_drawdown:float = settings.MAX_ABSOLUTE_DRAWDOWN,
                  max_relative_drawdown:float = settings.MAX_RELATIVE_DRAWDOWN, 

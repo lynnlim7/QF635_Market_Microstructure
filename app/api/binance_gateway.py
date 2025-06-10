@@ -15,7 +15,8 @@ from binance import AsyncClient, BinanceSocketManager, Client
 from binance.ws.depthcache import FuturesDepthCacheManager
 
 from app.common.interface_book import VenueOrderBook, PriceLevel, OrderBook
-from app.common.interface_order import OrderEvent, OrderStatus, ExecutionType, Side
+from app.common.interface_order import OrderEvent
+from app.common.order_event_update import OrderEventUpdate
 from app.services import RedisPool
 from app.utils.config import settings
 from app.utils.func import get_candlestick_channel, get_execution_channel, get_orderbook_channel
@@ -167,31 +168,20 @@ class BinanceGateway:
                 update_type = _data.get('e')
 
                 if update_type == 'ORDER_TRADE_UPDATE':
-                    _trade_data = _data.get('o')
-                    _order_id = _trade_data.get('c')
-                    _symbol = _trade_data.get('s')
-                    _execution_type = _trade_data.get('x')
-                    _order_status = _trade_data.get('X')
-                    _side = _trade_data.get('S')
-                    _last_filled_price = float(_trade_data.get('L'))
-                    _last_filled_qty = float(_trade_data.get('l'))
-
-                    # create an order event
-                    _order_event = OrderEvent(_symbol, _order_id, ExecutionType[_execution_type], OrderStatus[_order_status])
-                    _order_event.side = Side[_side]
-                    if _execution_type == 'TRADE':
-                        _order_event.last_filled_price = _last_filled_price
-                        _order_event.last_filled_quantity = _last_filled_qty
-
-                    execution_channel = get_execution_channel(self._symbol)
-                    self.publisher.publish(execution_channel, _order_event.to_dict())
-                    execution_logger.info(f"Order Trade update: {_order_event.to_dict()}")
+                    try:
+                        evt = OrderEventUpdate.from_user_stream(_data)
+                        execution_logger.info(f"Order Event: {evt}")
+                        execution_channel = get_execution_channel(self._symbol)
+                        self.publisher.publish(execution_channel, evt.to_dict())
+                    except ValueError as exc:
+                        execution_logger.error("Bad ORDER_TRADE_UPDATE: %s", exc)
+                        return
                     
                     # notify callbacks
                     if self._execution_callbacks:
                         # notify callbacks
                         for _callback in self._execution_callbacks:
-                            _callback(_order_event)
+                            _callback(evt)
                 else:
                     print(f"random msg: {_data}")
 
@@ -252,7 +242,7 @@ def on_orderbook(order_book: VenueOrderBook):
     orderbook_logger.info("Receive order book: {}".format(order_book))
 
 # callback on execution update
-def on_execution(order_event: OrderEvent):
+def on_execution(order_event: OrderEventUpdate):
     execution_logger.info("Receive poll: {}".format(order_event))
 
 def on_kline(order_event: OrderEvent):

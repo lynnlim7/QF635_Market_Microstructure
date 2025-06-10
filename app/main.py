@@ -6,6 +6,7 @@ from flask import Flask
 
 from app.api.binance_api import BinanceApi
 from app.api.binance_gateway import BinanceGateway
+from app.order_management.order_manager import OrderManager
 from app.portfolio.portfolio_manager import PortfolioManager
 from app.risk.risk_manager import RiskManager
 from app.routes import register_routes
@@ -13,7 +14,7 @@ from app.services import RedisPool
 from app.services.circuit_breaker import RedisCircuitBreaker
 from app.strategy.base_strategy import BaseStrategy
 from app.strategy.macd_strategy import MACDStrategy
-from app.queue.signalqueue import SignalQueue
+from app.queue_manager.signal_queue import SignalQueue
 from app.utils.config import settings
 from app.utils.func import get_execution_channel, get_orderbook_channel, get_candlestick_channel
 from app.utils.logger import main_logger as logger
@@ -28,7 +29,12 @@ redis_channels = [
     # add in other channels 
     ]
 
+gateway_instance: BinanceGateway | None = None
+strategy_instance: BaseStrategy | None = None
+binance_api = BinanceApi(settings.SYMBOL)
+
 redis_pool = RedisPool()
+redis_pool.create_circuit_breaker()
 
 circuit_breaker = redis_pool.create_circuit_breaker()
 publisher = redis_pool.create_publisher()
@@ -36,21 +42,23 @@ subscriber = redis_pool.create_subscriber(redis_channels)
 
 portfolio = PortfolioManager()
 risk_manager = RiskManager(
-    api=BinanceApi,
-    circuit_breaker=circuit_breaker,
+    api=binance_api,
     portfolio_manager=portfolio,
+    circuit_breaker=redis_pool.circuit_breaker, # clean up this part,
     trade_signal=MACDStrategy(symbol),
     trade_direction=MACDStrategy(symbol)
 )
 
-gateway_instance: BinanceGateway | None = None
-strategy_instance: BaseStrategy | None = None
-binance_api = BinanceApi(settings.SYMBOL)
+order_manager = OrderManager(
+    binance_api=binance_api
+)
+
+
 
 app = Flask(__name__)
 register_routes(app, binance_api)
 
-# Create global signal queue
+# Create global signal queue_manager
 signal_queue = SignalQueue()
 
 def start_binance() -> None:
@@ -79,6 +87,8 @@ def start_subscriber():
         time.sleep(1)
     logger.info("Strategy loaded")
 
+    global order_manager
+
     for channel in redis_channels:
         if "candlestick" in channel:
             subscriber.register_handler(channel, strategy_instance.update_data)
@@ -86,7 +96,7 @@ def start_subscriber():
 
         if "execution" in channel:
             subscriber.register_handler(channel, handle_execution_updates)
-
+            subscriber.register_handler(channel, order_manager.save_execution_updates)
         if "orderbook" in channel:
             subscriber.register_handler(channel, handle_order_book_quote)
         
@@ -96,6 +106,7 @@ def start_flask():
     # global app
     app.run(host="0.0.0.0", debug=True, use_reloader=False, port=8080)  # disable reloader in threaded mode
 
+# Intermediate callback to push signals into the queue_manager
 def signal_callback(signal: int):
     logger.info(f"Signal pushed to queue: {signal}")
     signal_queue.push(signal)
