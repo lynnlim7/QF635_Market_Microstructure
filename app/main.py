@@ -10,9 +10,10 @@ from app.portfolio.portfolio_manager import PortfolioManager
 from app.risk.risk_manager import RiskManager
 from app.routes import register_routes
 from app.services import RedisPool
+from app.services.circuit_breaker import RedisCircuitBreaker
 from app.strategy.base_strategy import BaseStrategy
 from app.strategy.macd_strategy import MACDStrategy
-from queue.signalqueue import SignalQueue
+from app.queue.signalqueue import SignalQueue
 from app.utils.config import settings
 from app.utils.func import get_execution_channel, get_orderbook_channel, get_candlestick_channel
 from app.utils.logger import main_logger as logger
@@ -29,11 +30,14 @@ redis_channels = [
 
 redis_pool = RedisPool()
 
-## redis publisher 
+circuit_breaker = redis_pool.create_circuit_breaker()
 publisher = redis_pool.create_publisher()
+subscriber = redis_pool.create_subscriber(redis_channels)
+
 portfolio = PortfolioManager()
 risk_manager = RiskManager(
     api=BinanceApi,
+    circuit_breaker=circuit_breaker,
     portfolio_manager=portfolio,
     trade_signal=MACDStrategy(symbol),
     trade_direction=MACDStrategy(symbol)
@@ -55,9 +59,9 @@ def start_binance() -> None:
     gateway_instance = BinanceGateway(symbol=symbol, redis_publisher=publisher)
     gateway_instance.connection()
 
-# sample to handle, you can do your own
 def handle_order_book_quote(data: dict):
-    # logger.info(f"Receiving order book quote from redis!!: {data}")
+    logger.info(f"Receiving orderbook data: {data}")
+    risk_manager.data_aggregator(data)
     return
 
 def handle_execution_updates(data: dict):
@@ -78,6 +82,7 @@ def start_subscriber():
     for channel in redis_channels:
         if "candlestick" in channel:
             subscriber.register_handler(channel, strategy_instance.update_data)
+            subscriber.register_handler(channel, risk_manager.process_candlestick)
 
         if "execution" in channel:
             subscriber.register_handler(channel, handle_execution_updates)
@@ -91,11 +96,11 @@ def start_flask():
     # global app
     app.run(host="0.0.0.0", debug=True, use_reloader=False, port=8080)  # disable reloader in threaded mode
 
-# Intermediate callback to push signals into the queue
 def signal_callback(signal: int):
     logger.info(f"Signal pushed to queue: {signal}")
     signal_queue.push(signal)
 
+#TODO: fix - risk unable to accept signal
 def signal_consumer_loop():
     while True:
         if not signal_queue.is_empty():
@@ -108,39 +113,69 @@ def main():
     logger.info(f"Start trading..")
 
     ## initialize modules
-    try:
-        global strategy_instance
-        strategy_instance = MACDStrategy(symbol)
-        strategy_instance.register_callback(signal_callback)
-        ##Lynn: may not need this part
-        #strategy_instance.register_callback(risk_manager.accept_signal)
+    circuit_breaker = redis_pool.create_circuit_breaker()
+    global strategy_instance
+    strategy_instance = MACDStrategy(symbol)
+    strategy_instance.register_callback(signal_callback)
+    logger.info("Strategy instance created and callback registered")
 
-        while True:
+    while True:
+        try: 
+            if not circuit_breaker.allow_request():
+                logger.warning(f"Circuit breaker is open. Stop trading.")
+                time.sleep(5)
+                continue
+
             orderbook_data = risk_manager.orderbook_df
-            price_data = risk_manager.candlestick_df# candlestick dataframe
-            if price_data is not None and len(price_data) != 0:
-                # if len(price_data)>100:
-                # logger.info(f"Current Candlestick: {price_data}")
+            price_data = risk_manager.candlestick_df
 
-                try:
-                    vol = risk_manager.calculate_rolling_vol()
-                    if vol is not None:
-                        print(f"Volatility: {vol:.4f}")
-                    else:
-                        print(f"Not enough data..")
-                    
-                except Exception as e:
-                    logger.error(f"Error calculating volatility: {e}")
+            if price_data is not None and len(price_data) != 0:
+                # current_price = float(price_data['close'].iloc[-1])
+                # current_prices = {settings.SYMBOL: current_price}
+                logger.info(f"Current price: {current_price:.4f}")
+
+                vol = risk_manager.calculate_rolling_vol()
+                atr = risk_manager.calculate_atr()
+                position_size = risk_manager.calculate_position_size()
+
+                if vol is not None:
+                    logger.info(f"Volatility: {vol:.4f}")
+                if atr is not None:
+                    logger.info(f"Average True Range: {atr:.4f}")
+                if position_size is not None:
+                    logger.info(f"Position Size: {position_size:.4f}")
+
+                drawdown_limit_check = risk_manager.calculate_drawdown_limits(current_prices)
+                if drawdown_limit_check == False:
+                    logger.warning("Drawdown limits breached. Opening circuit breaker.")
+                    circuit_breaker.force_open("Drawdown limits breached.")
+                    continue
+
+                entry_signal = risk_manager.entry_position(
+                    current_price=current_price,
+                    current_prices=current_prices,
+                )
+                
+                if entry_signal is not None:
+                    stop_loss, take_profit = entry_signal
+                    logger.info(f"Entry signal received - Stop Loss: {stop_loss:.4f}, Take Profit: {take_profit:.4f}")
                 else:
-                    logger.info("Waiting for candlestick data...")
-                    time.sleep(5)
-    except Exception as e:
-        logger.error(f"Test interrupted: {e}", e)
+                    logger.info("No entry signal generated")
+
+                risk_manager.manage_position(
+                    current_price=current_price,
+                    current_prices=current_prices
+                )
+            else:
+                logger.info("Waiting for candlestick data...")
+                time.sleep(5)    
+                    
+        except Exception as e:
+            logger.error(f"Error in main workflow: {e}", exc_info=True)
+            time.sleep(5)  # Add delay after error to prevent rapid retries
 
         # strategy.update_data(last_candle=price_data)
         # signal = strategy.generate_signal(price_data)
-
-        # TODO: pass signal into the risk manager
 
 
         # TODO : change to logger, or can even log it in the strategy

@@ -40,17 +40,15 @@ class RedisPool :
 
     def create_circuit_breaker(self) -> RedisCircuitBreaker:
         if self._circuit_breaker is None:
-            redis_client = redis.Redis.from_pool(self.pool)
-            self._circuit_breaker = RedisCircuitBreaker(redis_client)
+            self._circuit_breaker = RedisCircuitBreaker(self.pool)
         return self._circuit_breaker
 
-
-    def create_publisher(self, prefix : str ="") -> Union[RedisPublisher, RedisAsyncPublisher] :
-        if self.async_pool :
-            return RedisAsyncPublisher.from_pool(self.pool)
-        else :
-            return RedisPublisher.from_pool(self.pool)
+    def create_publisher(self) -> Union[RedisPublisher, RedisAsyncPublisher]:
+        circuit_breaker = self.create_circuit_breaker()
+        if self.async_pool:
+            return RedisAsyncPublisher.from_pool(self.pool, circuit_breaker)
+        else:
+            return RedisPublisher.from_pool(self.pool, circuit_breaker)
         
-
-    def create_subscriber(self, channels) -> RedisSubscriber :
+    def create_subscriber(self, channels) -> RedisSubscriber:
         return RedisSubscriber.from_pool(self.pool, channels)

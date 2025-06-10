@@ -228,7 +228,9 @@ class BinanceGateway:
                         for _callback in self._kline_callbacks:
                             _callback(candles_dict)
                 except Exception as e:
-                    kline_logger.exception(f"Encountered issue in kline stream processing")
+                    kline_logger.exception(f"Encountered issue in kline stream processing: {str(e)}")
+                    # Add a small delay before retrying
+                    await asyncio.sleep(1)
 
     """ 
     Register a depth callback function that takes one argument: (book: VenueOrderBook) 

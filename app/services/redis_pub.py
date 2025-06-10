@@ -56,18 +56,20 @@ class RedisPublisher:
         self._close()
 
     @classmethod
-    def from_pool(cls, pool) : 
-        return cls(pool)
+    def from_pool(cls, pool, circuit_breaker: RedisCircuitBreaker = None) : 
+        return cls(pool, circuit_breaker)
 
 
 class RedisAsyncPublisher :
     def __init__(
             self,
             pool : aredis.ConnectionPool,
+            circuit_breaker: RedisCircuitBreaker,
             prefix = settings.REDIS_PREFIX
         ):
         self.redis = aredis.Redis.from_pool(pool)
         self.prefix = prefix
+        self.circuit_breaker = circuit_breaker
 
     def _close(self) : 
         self.redis.close()
@@ -80,6 +82,10 @@ class RedisAsyncPublisher :
     
     async def publish(self, channel:str, data):
         try:
+            if not self.circuit_breaker.allow_request():
+                logging.warning(f"Circuit breaker is open - stop publishing to {channel}")
+                return
+
             redis_key = self.create_channel(channel)
             logging.info(f"Publishing to channel: {redis_key} with data: {data}")
 
@@ -90,8 +96,8 @@ class RedisAsyncPublisher :
             logging.error(f"Failed to publish: {e}")
 
     @classmethod
-    def from_pool(cls, pool) : 
-        return cls(pool)
+    def from_pool(cls, pool, circuit_breaker: RedisCircuitBreaker = None) : 
+        return cls(pool, circuit_breaker)
 
 
 
