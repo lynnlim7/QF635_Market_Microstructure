@@ -203,4 +203,5 @@ if __name__ == "__main__":
     threading.Thread(target=start_flask, daemon=True).start()
     threading.Thread(target=start_binance, daemon=True).start()
     threading.Thread(target=start_subscriber, daemon=True).start()
+    threading.Thread(target=signal_consumer_loop, daemon=True).start()
     main()
