@@ -1,5 +1,6 @@
 import numpy as np 
 import pandas as pd
+import math
 from app.utils.logger import setup_logger
 from app.utils.config import settings
 from app.utils.logger import main_logger
@@ -9,6 +10,13 @@ from app.strategy.macd_strategy import MACDStrategy
 from app.api.binance_gateway import BinanceGateway
 from app.api.binance_api import BinanceApi
 from app.services.circuit_breaker import RedisCircuitBreaker
+
+import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Union
+import threading
+import sys
+import msgspec
 
 #TODO: explain thought process on take profit/ stop loss - should we sell everything? or pause trading
 #TODO: listen to depth order book and take the mid price from best bid and ask
@@ -45,6 +53,8 @@ class RiskManager:
         self.portfolio_manager = portfolio_manager
         self.trade_signal = trade_signal
         self.trade_direction = trade_direction
+
+        self.active_threads = []
 
     def data_aggregator(self, data:dict):
         risk_logger.info("Fetching orderbook data..")
@@ -235,7 +245,34 @@ class RiskManager:
                 self.close_poition("BUY", current_price)
                 return
 
+    def register_callback(self, queue : mp.Queue, callback_func : Union[str, Callable], schema : msgspec.Struct) : 
+        if isinstance(callback_func, str) :
+            callback_func = getattr(self, callback_func, None)
+            if not(callback_func) or not(callable(callback_func)) : 
+                raise TypeError(f'unable to register \"{callback_func}\" as callback as the method is not implemented!')
 
+        t = threading.Thread(self._register_callback, args=(queue, callback_func, schema), daemon=True)
+        self.active_threads.append(t) 
+
+    def _register_callback(self, queue : mp.Queue , method : Callable, schema : msgspec.Struct) :
+        decoder = msgspec.msgpack.Decoder(schema)
+        while True : 
+            data = queue.get()
+            if data is None: # Sentinel for graceful shutdown
+                print("Callback thread: Received shutdown sentinel.")
+                break
+            
+            try :
+                obj = decoder.decode(data)
+                method(obj)
+            except Exception as e :
+                print(f"Callback thread Error processing data: {e} for data: {data}", file=sys.stderr)
+                # You might log this, put to an error queue, etc.
+                continue # Continue processing other items
+        
+    def start(self) : 
+        for t in self.active_threads : 
+            t.start()
 
         
 
