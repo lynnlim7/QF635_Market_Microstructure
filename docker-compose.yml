@@ -29,29 +29,29 @@ services:
       interval: 5s
       retries: 5
 
-  db-migrator:
-    build:
-      context: .
-    command: ["./db/migrate.sh"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-    env_file:
-      - .env
-    restart: "no"
+#   db-migrator:
+#     build:
+#       context: .
+#     command: ["./db/migrate.sh"]
+#     depends_on:
+#       postgres:
+#         condition: service_healthy
+#     env_file:
+#       - .env
+#     restart: "no"
 
-  trading-bot:
-    build:
-      context: .
-    command: ["python3", "app/main.py"]
-    depends_on:
-      - redis
-#    network_mode: host
-    ports:
-      - "8080:8080"
-    env_file:
-      - .env
-    cpuset: "1"
+#   trading-bot:
+#     build:
+#       context: .
+#     command: ["python3", "app/main.py"]
+#     depends_on:
+#       - redis
+# #    network_mode: host
+#     ports:
+#       - "8080:8080"
+#     env_file:
+#       - .env
+#     cpuset: "1"
 
 volumes:
   redis_data:

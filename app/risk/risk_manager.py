@@ -14,6 +14,8 @@ from app.services.circuit_breaker import RedisCircuitBreaker
 #TODO: listen to depth order book and take the mid price from best bid and ask
 #TODO : dynamic take profit and stop loss - adjust take profit and stop loss pct based on market vol (multiples of ATR)
 #TODO : handle market order (default) and limit order (fill up price)
+#TODO : call binance to creater order if receive buy signal - how much to buy?
+
 
 risk_logger = setup_logger(
             logger_name="risk",
@@ -24,28 +26,23 @@ risk_logger = setup_logger(
 
 class RiskManager:
     def __init__(self, 
+                 symbol: str,
                  api:BinanceApi,
-                 portfolio_manager:PortfolioManager,
-                 trade_signal: MACDStrategy,
-                 trade_direction: MACDStrategy,
                  circuit_breaker: RedisCircuitBreaker,
                  max_risk_per_trade_pct:float = settings.MAX_RISK_PER_TRADE_PCT, 
                  max_absolute_drawdown:float = settings.MAX_ABSOLUTE_DRAWDOWN,
                  max_relative_drawdown:float = settings.MAX_RELATIVE_DRAWDOWN, 
                  ):
+        self.api = api
+        self.symbol = symbol
+        self.active_trades = {}  
         self.orderbook_df = pd.DataFrame()
         self.candlestick_df = pd.DataFrame()
-        self.api = api
         self.circuit_breaker = circuit_breaker
-        self.initial_value = None
         self.max_risk_per_trade_pct = max_risk_per_trade_pct
         self.max_absolute_drawdown = max_absolute_drawdown
         self.max_relative_drawdown = max_relative_drawdown
-        self.peak_value = None
-        self.portfolio_manager = portfolio_manager
-        self.trade_signal = trade_signal
-        self.trade_direction = trade_direction
-        self.active_trades = None
+        
 
     def data_aggregator(self, data:dict):
         risk_logger.info("Fetching orderbook data..")
@@ -70,24 +67,6 @@ class RiskManager:
         
         self.orderbook_df = pd.concat([self.orderbook_df, row]).tail(500) # take latest 500
 
-    # callback function from strategy - takes signal from queue
-    def accept_signal(self, signal: int):
-        main_logger.info(f"Received Signal from strategy: {signal}")
-
-    # dynamic calculation of volatility adapted to mkt conditions
-    def calculate_rolling_vol(self, window: int = 21):
-        if len(self.orderbook_df) > 1:
-            try:
-                log_returns = np.log(self.orderbook_df['mid_price']).diff()
-                if log_returns.empty:
-                    return None
-                self.rolling_vol = log_returns.rolling(window=window, min_periods=1).std() * np.sqrt(252)
-                return float(self.rolling_vol.iloc[-1]) if not self.rolling_vol.empty else None
-            except Exception as e:
-                risk_logger.error(f"Error calculating rolling volatility: {e}", exc_info=True)
-                return None
-        return None
-
     # store rolling historical candlestick data as df 
     def process_candlestick(self, data: dict):
         risk_logger.info("Processing candlestick data..")
@@ -98,7 +77,6 @@ class RiskManager:
             return
 
         try:
-            # Create DataFrame with timestamp as index
             row = pd.DataFrame([{
                 'timestamp': data['start_time'],
                 'open': float(data['open']),
@@ -120,7 +98,6 @@ class RiskManager:
                     self.candlestick_df = pd.concat([self.candlestick_df, row])
                     self.candlestick_df = self.candlestick_df.tail(500)  # Keep last 500 candles
                     risk_logger.info(f"Added new candlestick at {timestamp}")
-                    risk_logger.debug(f"Current candlestick data:\n{self.candlestick_df}")
                 else:
                     self.candlestick_df.loc[timestamp] = row.iloc[0]
                     risk_logger.info(f"Updated existing candlestick at {timestamp}")
@@ -150,23 +127,136 @@ class RiskManager:
             return None
 
     # dynamic position size 
-    def calculate_position_size(self):
+    # should be based on current existing positions - net positions? 
+    def calculate_position_size(self) -> float:
         atr = self.calculate_atr()
-        if atr is None:
-            risk_logger.warning("Unable to calculate ATR, using capital as default position size.")
-            return self.portfolio_manager.get_cash()
+        if atr is None or atr <= 0:
+            risk_logger.warning("Unable to calculate ATR. Skipping position sizing and trade.")
+            return 
         
-        # one pos size per trade 
-        capital = self.portfolio_manager.get_cash()
-        risk_amount = capital * self.max_risk_per_trade_pct
+        entry_price = self.orderbook_df['mid_price'].iloc[-1] 
+        risk_amount = entry_price * self.max_risk_per_trade_pct
         position_size = risk_amount / atr
         return position_size
     
+    # check if position is open
+    def is_position_open(self, positions:list) -> bool:
+        for pos in positions:
+            if pos['symbol'] == self.symbol and float(pos['positionAmt']) != 0.0:
+                risk_logger.info(f"Position for {self.symbol} is open with quantity: {pos['positionAmt']}")
+                return True
+        return False
+        
+    # callback function from strategy - takes signal from queue
+    def accept_signal(self, signal: int):
+        positions = Client.futures_position_information()
+        if not self.is_position_open(positions):
+            main_logger.info(f"Received Signal from strategy: {signal}")
+        else:
+            main_logger.info(f"Position already open for {self.symbol}, ignoring signal: {signal}")
+            return
+    
+    # check exposure- see if wanna buy more 
+    def entry_position(self):
+        if self.is_position_open() is False: #FIX ME
+            position_size = self.calculate_position_size()
+            try:
+                # default to market order
+                entry_price = self.orderbook_df['mid_price'].iloc[-1]
+                direction = self.accept_signal()
+                self.api.place_market_order(
+                    side=direction,
+                    qty=position_size,
+                    symbol=self.symbol
+                )
+                risk_logger.info(f"Placed market order for {self.symbol} with quantity: {position_size}")
+
+                # # backup limit order at entry price 
+                # self.api.place_limit_order(
+                #     side=direction,
+                #     qty=position_size,
+                #     symbol=self.symbol,
+                #     price=entry_price, 
+                #     tif=settings.TIME_IN_FORCE_GTC
+                # )
+                risk_logger.info(f"Placed limit order for {self.symbol} at price: {entry_price}")
+
+                self.active_trades[self.symbol] = {
+                    "entry_price": entry_price,
+                    "quantity": position_size,
+                    "trade_direction": self.trade_directions(direction)
+                }
+                
+            except Exception as e:
+                risk_logger.error(f"Failed to place market order for {self.symbol}: {e}")
+
+    def manage_position(self, atr_multiplier=1.0):
+        positions = self.api.futures_position_information()
+        if positions is None or positions == 0:
+            risk_logger.info(f"No open positions.")
+            return 
+        
+        entry_price = float(positions['entryPrice'])
+        qty = float(positions['positionAmt'])
+        direction = positions['positionSide'] == 'LONG' if positions > 0 else "SHORT"
+
+        atr = self.calculate_atr()
+        risk = atr * atr_multiplier
+        current_price = self.orderbook_df['mid_price'].iloc[-1]
+        # risk reward ratio 
+        r_multiple = (current_price - entry_price) / risk if direction == "LONG" else (entry_price - current_price) / risk
+            
+        # cancel old stop loss and take profit orders and create new ones
+        self.api.futures_cancel_all_open_orders(symbol=self.symbol)
+
+        ## take profit and stop loss orders
+        # Return multiple - risk management strategy 
+        if direction == "LONG":
+            if r_multiple >= 2.0:
+                sl = entry_price + risk 
+                tp = current_price + (2 * risk)
+            elif r_multiple >= 1.0:
+                sl = entry_price + (3 * risk)
+                tp = current_price + risk
+        
+        elif direction == "SHORT":
+            if r_multiple >= 2.0:
+                sl = entry_price - risk 
+                tp = current_price - (2 * risk)
+            elif r_multiple >= 1.0:
+                sl = entry_price - (3 * risk)
+                tp = current_price - risk
+
+        
+
+        # place new stop loss and take profit orders
+        self.api.place_stop_loss_order(
+            side=direction,
+            qty=qty,
+            symbol=self.symbol,
+            stop_price=sl,
+            price=sl,  # price for stop loss order
+            tif=settings.TIME_IN_FORCE_GTC
+        )
+        risk_logger.info(f"Placed stop loss order for {self.symbol} at price: {sl}")
+        self.api.place_take_profit_order(
+            side=direction,
+            qty=qty,
+            symbol=self.symbol,
+            stop_price=tp,
+            price=tp,  # price for take profit order
+            tif=settings.TIME_IN_FORCE_GTC
+        )
+        risk_logger.info(f"Placed take profit order for {self.symbol} at price: {tp}")
+            
     ## total portfolio risk
-    def calculate_drawdown_limits(self, current_prices:dict) -> bool:
-        current_value = self.portfolio_manager.get_total_portfolio_value(current_prices)
+    def calculate_drawdown_limits(self) -> bool:
+        peak_value = self.candlestick_df['high'].max() 
+        current_value = 
+
+
         if self.initial_value is None:
-            self.initial_value = current_value # initial portfolio value 
+            self.initial_value = current_value 
         if self.peak_value is None or current_value>self.peak_value:
             self.peak_value = current_value
     
@@ -199,70 +289,10 @@ class RiskManager:
             return "SELL"
         return "HOLD"
     
-    def calc_tp_sl(self, entry_price:float, atr:float, trade_direction:str, sl_multi=1.0, tp_multi=2.0):
-        if trade_direction == "LONG":
-            stop_loss = entry_price - sl_multi * atr
-            take_profit = entry_price + sl_multi * atr
-        elif trade_direction == "SHORT":
-            stop_loss = entry_price + sl_multi * atr
-            take_profit = entry_price - sl_multi * atr 
-        return take_profit, stop_loss
-
-    def entry_position(self, current_price:float, current_prices:dict):
-        signal_score = self.trade_signal.generate_signal()
-        signal_direction = self.trade_directions(signal_score)
-
-        if signal_direction == "HOLD":
-            risk_logger.info("No entry signal.")
-            return 
-        
-        if self.calculate_drawdown_limits(current_prices, order=None) is False:
-            risk_logger.info("Drawdown limit breached, trade entry blocked.")
-            return 
-        
-        if not self.orderbook_df.empty:
-            entry_price = self.orderbook_df['mid_price'].iloc[-1]
-        else: 
-            risk_logger.info("Unable to get orderbook data.")
-            return
-        
-        atr = self.calculate_atr()
-        # realized_vol = self.calculate_volatility(window=30)
-        stop_loss, take_profit = self.calc_tp_sl(entry_price, atr, signal_direction)
-
-        self.active_trades = {
-            "trade_direction": signal_direction, 
-            "stop_loss": stop_loss,
-            "take_profit": take_profit
-        }
-        return stop_loss, take_profit
     
-    #TODO: if there are open orders, should we buy more?
-    def manage_position(self, current_price:float, current_prices:dict):
-        if self.active_trades is None:
-            risk_logger.info("No active trades to monitor.")
-            return
 
-        active_trades = self.active_trades()
-
-        trade_direction = active_trades["trade_direction"]
-        stop_loss = active_trades["stop_loss"]
-        take_profit = active_trades["take_profit"]
-
-        if trade_direction == "BUY":
-            if (current_price <= stop_loss) or (current_price >= take_profit):
-                risk_logger.info("Take profit/ Stop loss hit, exiting long position..")
-                self.close_position("SELL", current_price)
-                return
-        elif trade_direction == "SELL":
-            if (current_price >= stop_loss) or (current_price <= take_profit):
-                risk_logger.info("Take profit/ Stop loss hit, exiting short position..")
-                self.close_poition("BUY", current_price)
-                return
             
 
-#TODO : call binance to creater order if receive buy signal - how much to buy?
-#TODO : to be able to create limit orders
 
 
         

@@ -30,6 +30,22 @@ class BinanceApi:
         self._client = Client(self._api_key, self._api_secret, testnet=testnet)
 
     """
+    Place market order for futures trading
+    """
+    def place_market_order(self, quantity) -> bool:
+        try:
+            self.check_client_exist()
+            order_response = self._client.futures_create_order(symbol=self._symbol.upper(),
+                                              side=Client.SIDE_BUY,
+                                              type=Client.ORDER_TYPE_MARKET,
+                                              quantity=quantity)
+            api_logger.info(f"Order submitted: {order_response}")
+            return order_response
+        except Exception as e:
+            api_logger.error("Failed to place order: {}".format(e))
+            return False
+            
+    """
     Place a limit order for FUTURES trading
     """
     def place_limit_order(self, side: Side, price, quantity, tif='IOC') -> bool:
