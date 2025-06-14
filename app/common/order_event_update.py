@@ -88,6 +88,39 @@ class OrderEventUpdate:
         )
         return d
 
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "OrderEventUpdate":
+        return cls(
+            symbol=d["symbol"],
+            order_id=int(d["order_id"]),
+            client_order_id=d["client_order_id"],
+            side=d["side"],
+            position_side=d["position_side"],
+
+            exec_type=d["exec_type"],
+            status=d["status"],
+            order_type=d["order_type"],
+            time_in_force=d["time_in_force"],
+
+            orig_qty=Decimal(d["orig_qty"]),
+            cum_filled_qty=Decimal(d["cum_filled_qty"]),
+            avg_price=Decimal(d["avg_price"]),
+
+            last_qty=Decimal(d["last_qty"]),
+            last_price=Decimal(d["last_price"]),
+            commission=Decimal(d["commission"]),
+
+            realized_pnl=Decimal(d["realized_pnl"]),
+            is_maker=bool(d["is_maker"]),
+
+            event_time_ms=int(d["event_time_ms"]),
+            trade_time_ms=int(d["trade_time_ms"]),
+
+            stop_price=Decimal(d["stop_price"]),
+            activation_price=Decimal(d["activation_price"]),
+            callback_rate=Decimal(d["callback_rate"]),
+        )
+
     def to_dict(self):
         return to_clean_dict(self)
 
