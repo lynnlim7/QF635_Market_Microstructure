@@ -14,7 +14,7 @@ from app.services import RedisPool
 from app.services.circuit_breaker import RedisCircuitBreaker
 from app.strategy.base_strategy import BaseStrategy
 from app.strategy.macd_strategy import MACDStrategy
-from app.queue_manager.signal_queue import SignalQueue
+from app.queue_manager.locking_queue import LockingQueue
 from app.utils.config import settings
 from app.utils.func import get_execution_channel, get_orderbook_channel, get_candlestick_channel
 from app.utils.logger import main_logger as logger
@@ -38,12 +38,10 @@ redis_pool.create_circuit_breaker()
 
 circuit_breaker = redis_pool.create_circuit_breaker()
 publisher = redis_pool.create_publisher()
-subscriber = redis_pool.create_subscriber(redis_channels)
-
-portfolio = PortfolioManager()
+portfolio_manager = PortfolioManager()
 risk_manager = RiskManager(
     api=binance_api,
-    portfolio_manager=portfolio,
+    portfolio_manager=portfolio_manager,
     circuit_breaker=redis_pool.circuit_breaker, # clean up this part,
     trade_signal=MACDStrategy(symbol),
     trade_direction=MACDStrategy(symbol)
@@ -59,7 +57,8 @@ app = Flask(__name__)
 register_routes(app, binance_api)
 
 # Create global signal queue_manager
-signal_queue = SignalQueue()
+signal_queue = LockingQueue()
+order_queue = LockingQueue()
 
 def start_binance() -> None:
     logger.info("Starting binance now")
@@ -68,12 +67,11 @@ def start_binance() -> None:
     gateway_instance.connection()
 
 def handle_order_book_quote(data: dict):
-    logger.info(f"Receiving orderbook data: {data}")
-    risk_manager.data_aggregator(data)
+    # logger.info(f"Receiving order book quote from redis!!: {data}")
     return
 
 def handle_execution_updates(data: dict):
-    logger.info(f"Receiving execution updates: {data}")
+    order_queue.push(data)
 
 def start_subscriber():
     logger.info("Starting subscriber now")
@@ -96,9 +94,12 @@ def start_subscriber():
 
         if "execution" in channel:
             subscriber.register_handler(channel, handle_execution_updates)
-            subscriber.register_handler(channel, order_manager.save_execution_updates)
+            subscriber.register_handler(channel, portfolio_manager.on_new_trade)
+
         if "orderbook" in channel:
             subscriber.register_handler(channel, handle_order_book_quote)
+            subscriber.register_handler(channel, portfolio_manager.on_new_price)
+
         
     subscriber.start_subscribing()
 
@@ -118,7 +119,15 @@ def signal_consumer_loop():
             signal = signal_queue.pop()
             if signal is not None:
                 risk_manager.accept_signal(signal)
-        time.sleep(1) 
+        time.sleep(1)
+
+def order_consumer_loop():
+    while True:
+        if not order_queue.is_empty() and order_manager:
+            data = order_queue.pop()
+            if data[1] is not None:
+                order_manager.save_execution_updates(data[1])
+        time.sleep(1)
 
 def main():
     logger.info(f"Start trading..")
@@ -204,4 +213,5 @@ if __name__ == "__main__":
     threading.Thread(target=start_binance, daemon=True).start()
     threading.Thread(target=start_subscriber, daemon=True).start()
     threading.Thread(target=signal_consumer_loop, daemon=True).start()
+    threading.Thread(target=order_consumer_loop, daemon=True).start()
     main()
