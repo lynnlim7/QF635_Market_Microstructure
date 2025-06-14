@@ -2,17 +2,17 @@ from collections import deque
 from typing import Any
 import threading
 
-class SignalQueue:
+class LockingQueue:
     def __init__(self):
         self._queue = deque()
         self._lock = threading.Lock()
         self._sequence = 0  # Sequence counter
     
-    def push(self, signal: Any):
+    def push(self, data: Any):
         """Add signal to the queue with a sequence number."""
         with self._lock:
             self._sequence += 1
-            self._queue.append((self._sequence, signal))
+            self._queue.append((self._sequence, data))
 
     def pop(self):
         """Pop the oldest signal from the queue."""
