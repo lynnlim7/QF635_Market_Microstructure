@@ -40,4 +40,5 @@ class SignalQueue:
             self._sequence = 0
 
     def is_empty(self):
-        return len(self._queue) == 0
+        with self._lock:
+            return len(self._queue) == 0
