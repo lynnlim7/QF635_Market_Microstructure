@@ -11,6 +11,8 @@ from threading import Thread
 
 import schedule
 import websockets
+import websockets.exceptions
+
 from binance import AsyncClient, BinanceSocketManager, Client
 from binance.ws.depthcache import FuturesDepthCacheManager
 
@@ -21,6 +23,7 @@ from app.services import RedisPool
 from app.utils.config import settings
 from app.utils.func import get_candlestick_channel, get_execution_channel, get_orderbook_channel
 from app.utils.logger import setup_logger
+from app.utils.logger import main_logger as logger
 
 # initialize redis pub
 # redis_publisher = RedisPublisher(prefix="market_data")
@@ -158,32 +161,29 @@ class BinanceGateway:
         else:
             url = 'wss://fstream.binance.com/ws/' + self._listen_key
 
-        async with websockets.connect(url) as ws : 
-            while ws.open:
-                _message = await ws.recv()
-                # logging.info(_message)
+        async with websockets.connect(url) as ws :
+            try:
+                async for _message in ws:
+                    _data = json.loads(_message)
+                    update_type = _data.get('e')
 
-                # convert to json
-                _data = json.loads(_message)
-                update_type = _data.get('e')
+                    if update_type == 'ORDER_TRADE_UPDATE':
+                        try:
+                            evt = OrderEventUpdate.from_user_stream(_data)
+                            execution_logger.info(f"Order Event: {evt}")
+                            execution_channel = get_execution_channel(self._symbol)
+                            self.publisher.publish(execution_channel, evt.to_dict())
+                        except ValueError as exc:
+                            execution_logger.error("Bad ORDER_TRADE_UPDATE: %s", exc)
+                            return
 
-                if update_type == 'ORDER_TRADE_UPDATE':
-                    try:
-                        evt = OrderEventUpdate.from_user_stream(_data)
-                        execution_logger.info(f"Order Event: {evt}")
-                        execution_channel = get_execution_channel(self._symbol)
-                        self.publisher.publish(execution_channel, evt.to_dict())
-                    except ValueError as exc:
-                        execution_logger.error("Bad ORDER_TRADE_UPDATE: %s", exc)
-                        return
-                    
-                    # notify callbacks
-                    if self._execution_callbacks:
-                        # notify callbacks
-                        for _callback in self._execution_callbacks:
-                            _callback(evt)
-                else:
-                    print(f"random msg: {_data}")
+                        if self._execution_callbacks:
+                            for _callback in self._execution_callbacks:
+                                _callback(evt)
+                    else:
+                        logger.info(f"random msg: {_data}")
+            except websockets.exceptions.ConnectionClosed:
+                logger.warn("WebSocket connection closed")
 
     async def _listen_kline_forever(self):
         kline_logger.info("Subscribing to kline stream")

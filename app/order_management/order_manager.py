@@ -21,7 +21,7 @@ class OrderManager:
 
         session: Session = self._session_factory()
         try:
-            if order.status == OrderStatus.NEW and order.order_type == OrderType.LIMIT:
+            if order.status == OrderStatus.NEW:
                 session.add(order)
                 logger.info(f"Inserted new order {order.order_id}")
             else:
