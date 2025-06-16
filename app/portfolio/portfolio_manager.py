@@ -146,8 +146,8 @@ class PortfolioManager:
 
 
     # State Accessors
-    def get_unrealised_pnl(self):
-        return self.get_realized_pnl()
+    # def get_unrealised_pnl(self):
+    #     return self.get_realized_pnl()
 
     def get_portfolio_stats_by_symbol(self, symbol: str):
         if not symbol:
@@ -176,7 +176,15 @@ class PortfolioManager:
         return pnl
 
     def get_total_portfolio_value(self, current_prices: dict):
-        return self.cash + self.get_unrealized_pnl(current_prices)
+        cash = self.cash
+        position_value = 0.0
+        for sym, pos in self.positions.items():
+            if sym in current_prices:
+                market_price = current_prices[sym]
+                position_value += market_price * pos["qty"]
+
+        realized_pnl = self.get_realized_pnl()
+        return cash + position_value + realized_pnl 
 
 
 

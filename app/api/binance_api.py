@@ -62,10 +62,46 @@ class BinanceApi:
         except Exception as e:
             api_logger.error("Failed to place order: {}".format(e))
             return False
+        
+    def get_open_orders(self):
+        try: 
+            self.check_client_exist()
+            open_orders = self._client.futures_get_open_orders(symbol=self._symbol.upper())
+            return open_orders
+        except Exception as e:
+            api_logger.warning("Failed to retrieve open orders: {}".format(e))
+            return []
 
-    """
-    order_id: its the client_order_id from the order creation: x-Cb7ytekJff39894ef6683781a05ad8
-    """
+    def place_stop_loss(self, quantity: float, price: float, is_long: bool = True) -> bool:
+        try: 
+            self.check_client_exist()
+            order_response = self._client.futures_create_order(
+                                              symbol=self._symbol.upper(),
+                                              side=Client.SIDE_SELL if is_long else Client.SIDE_BUY,
+                                              type=Client.ORDER_TYPE_STOP_LOSS,
+                                              price=price,
+                                              quantity=quantity,
+                                              timeInForce='GTC')
+            return order_response
+        except Exception as e:
+            api_logger.warning("Failed to create stop loss order: {}".format(e))
+            return False
+        
+    def place_take_profit(self, quantity: float, price: float, is_long: bool) -> bool:
+        try:
+            self.check_client_exist()
+            order_response = self._client.futures_create_order(
+                                              symbol=self._symbol.upper(),
+                                              side=Client.SIDE_SELL if is_long else Client.SIDE_BUY,
+                                              type=Client.ORDER_TYPE_TAKE_PROFIT,
+                                              price=price,
+                                              quantity=quantity,
+                                              timeInForce='GTC')
+            return order_response
+        except Exception as e:
+            api_logger.warning("Failed to create take profit order: {}".format(e))
+            return False
+            
     def cancel_order(self, order_id) -> bool:
         try:
             self.check_client_exist()
@@ -73,6 +109,15 @@ class BinanceApi:
             return order_response
         except Exception as e:
             api_logger.warning("Failed to cancel order: {}, {}".format(order_id, e))
+            return False
+        
+    def cancel_open_orders(self):
+        try:
+            self.check_client_exist()
+            order_response = self._client.futures_cancel_all_open_orders(symbol=self._symbol.upper())
+            return order_response
+        except Exception as e:
+            api_logger.warning("Failed to cancel all open orders: {}".format(e))
             return False
 
     def check_client_exist(self):

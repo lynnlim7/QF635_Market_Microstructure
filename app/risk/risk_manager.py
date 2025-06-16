@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from app.utils.logger import setup_logger
 from app.utils.config import settings
-from app.utils.logger import main_logger
+from app.utils.logger import main_logger as logger
 from binance.client import Client
 from app.portfolio.portfolio_manager import PortfolioManager
 from app.strategy.macd_strategy import MACDStrategy
@@ -16,36 +16,32 @@ from app.services.circuit_breaker import RedisCircuitBreaker
 #TODO : handle market order (default) and limit order (fill up price)
 #TODO : call binance to creater order if receive buy signal - how much to buy?
 
-
-risk_logger = setup_logger(
-            logger_name="risk",
-            logger_path="./logs/risk",
-            log_type="risk",
-            enable_console=False
-            )
-
 class RiskManager:
     def __init__(self, 
-                 symbol: str,
+                 symbols: list[str],
                  api:BinanceApi,
+                 portfolio_manager:PortfolioManager,
                  circuit_breaker: RedisCircuitBreaker,
                  max_risk_per_trade_pct:float = settings.MAX_RISK_PER_TRADE_PCT, 
                  max_absolute_drawdown:float = settings.MAX_ABSOLUTE_DRAWDOWN,
                  max_relative_drawdown:float = settings.MAX_RELATIVE_DRAWDOWN, 
+                 max_exposure_pct:float = settings.MAX_EXPOSURE_PCT
                  ):
         self.api = api
-        self.symbol = symbol
-        self.active_trades = {}  
-        self.orderbook_df = pd.DataFrame()
-        self.candlestick_df = pd.DataFrame()
+        self.symbols = symbols
+        self.active_trades = {symbol:{} for symbol in symbols}
+        self.orderbook_df = {symbol:pd.DataFrame() for symbol in symbols}
+        self.candlestick_df = {symbol:pd.DataFrame() for symbol in symbols}
+        self.portfolio_manager = portfolio_manager
         self.circuit_breaker = circuit_breaker
         self.max_risk_per_trade_pct = max_risk_per_trade_pct
         self.max_absolute_drawdown = max_absolute_drawdown
         self.max_relative_drawdown = max_relative_drawdown
+        self.max_exposure_pct = max_exposure_pct
         
 
     def data_aggregator(self, data:dict):
-        risk_logger.info("Fetching orderbook data..")
+        logger.info("Fetching orderbook data..")
         bids = data.get("bids", [])
         asks = data.get("asks", [])
         timestamp = pd.to_datetime(data.get("timestamp", None), unit='ms')
@@ -69,11 +65,11 @@ class RiskManager:
 
     # store rolling historical candlestick data as df 
     def process_candlestick(self, data: dict):
-        risk_logger.info("Processing candlestick data..")
-        risk_logger.debug(f"Received candlestick data: {data}")
+        logger.info("Processing candlestick data..")
+        logger.debug(f"Received candlestick data: {data}")
         
         if not data.get('is_closed', False):
-            risk_logger.debug("Received incomplete candlestick. Skipping.")
+            logger.debug("Received incomplete candlestick. Skipping.")
             return
 
         try:
@@ -91,23 +87,23 @@ class RiskManager:
             
             if self.candlestick_df.empty:
                 self.candlestick_df = row
-                risk_logger.info(f"Initialized candlestick dataframe with first row: {row}")
+                logger.info(f"Initialized candlestick dataframe with first row: {row}")
             else: 
                 timestamp = row.index[0]
                 if timestamp not in self.candlestick_df.index:
                     self.candlestick_df = pd.concat([self.candlestick_df, row])
                     self.candlestick_df = self.candlestick_df.tail(500)  # Keep last 500 candles
-                    risk_logger.info(f"Added new candlestick at {timestamp}")
+                    logger.info(f"Added new candlestick at {timestamp}")
                 else:
                     self.candlestick_df.loc[timestamp] = row.iloc[0]
-                    risk_logger.info(f"Updated existing candlestick at {timestamp}")
+                    logger.info(f"Updated existing candlestick at {timestamp}")
         except Exception as e:
-            risk_logger.error(f"Error processing candlestick data: {e}", exc_info=True)
+            logger.error(f"Error processing candlestick data: {e}", exc_info=True)
 
     # average true range - measure price vol of asset approx 14 days 
     def calculate_atr(self, period=14):
         if self.candlestick_df.empty:
-            risk_logger.warning("No candlestick data available for ATR calculations.")
+            logger.warning("No candlestick data available for ATR calculations.")
             return None 
         
         try:
@@ -123,7 +119,7 @@ class RiskManager:
             atr = true_range.rolling(window=period, min_periods=1).mean()
             return float(atr.iloc[-1]) if not atr.empty else None
         except Exception as e:
-            risk_logger.error(f"Error calculating ATR: {e}", exc_info=True)
+            logger.error(f"Error calculating ATR: {e}", exc_info=True)
             return None
 
     # dynamic position size 
@@ -131,7 +127,7 @@ class RiskManager:
     def calculate_position_size(self) -> float:
         atr = self.calculate_atr()
         if atr is None or atr <= 0:
-            risk_logger.warning("Unable to calculate ATR. Skipping position sizing and trade.")
+            logger.warning("Unable to calculate ATR. Skipping position sizing and trade.")
             return 
         
         entry_price = self.orderbook_df['mid_price'].iloc[-1] 
@@ -139,156 +135,203 @@ class RiskManager:
         position_size = risk_amount / atr
         return position_size
     
-    # check if position is open
-    def is_position_open(self, positions:list) -> bool:
-        for pos in positions:
-            if pos['symbol'] == self.symbol and float(pos['positionAmt']) != 0.0:
-                risk_logger.info(f"Position for {self.symbol} is open with quantity: {pos['positionAmt']}")
-                return True
-        return False
-        
-    # callback function from strategy - takes signal from queue
-    def accept_signal(self, signal: int):
-        positions = Client.futures_position_information()
-        if not self.is_position_open(positions):
-            main_logger.info(f"Received Signal from strategy: {signal}")
-        else:
-            main_logger.info(f"Position already open for {self.symbol}, ignoring signal: {signal}")
-            return
+    def trade_directions(self, signal:int) -> str:
+        if signal == settings.SIGNAL_SCORE_BUY:
+            return "BUY"
+        elif signal == settings.SIGNAL_SCORE_SELL:
+            return "SELL"
+        return "HOLD"
     
-    # check exposure- see if wanna buy more 
-    def entry_position(self):
-        if self.is_position_open() is False: #FIX ME
-            position_size = self.calculate_position_size()
+    def accept_signal(self, signal: int, symbol:str) -> str:
+        direction = self.trade_directions(signal)
+        portfolio_stats = self.portfolio_manager.get_portfolio_stats(symbol)
+        portfolio_value = self.portfolio_manager.get_total_portfolio_value()
+        max_exposure = portfolio_value * self.max_exposure_pct
+        position = portfolio_stats['position']
+        current_price = self.orderbook_df[symbol]['mid_price'].iloc[-1]
+        net_exposure = abs(position['qty'] * current_price)
+
+        if not direction or direction == "HOLD":
+            logger.info("No valid trade signal received. Holding position.")
+            return None
+        
+        if direction == "BUY":
+            if net_exposure >= max_exposure:
+                logger.info(f"Max exposure reached for {symbol}, ignoring signal.")
+                return None
+            elif net_exposure < max_exposure:
+                logger.info(f"Accepting BUY signal for {symbol}. Current exposure: {net_exposure}.")
+                return direction
+        elif direction == "SELL":
+            logger.info(f"Accepted signal for {symbol}: {direction}.")
+            return direction
+
+    # check exposure- see if wanna buy more ?
+    def entry_position(self, symbol: str):
+        portfolio_stats = self.portfolio_manager.get_portfolio_stats(symbol)
+        # if no existing position, calculate position size
+        if portfolio_stats['position'] is None or portfolio_stats['position']['qty'] == 0:
+            logger.info(f"No open position for {symbol}, calculating position size.")
+            position_size = self.calculate_position_size(symbol)
+            if not position_size:
+                logger.warning(f"Could not calculate position size for {symbol}. Skipping trade.")
+                return 
+            
             try:
                 # default to market order
-                entry_price = self.orderbook_df['mid_price'].iloc[-1]
+                entry_price = self.orderbook_df[symbol]['mid_price'].iloc[-1]
                 direction = self.accept_signal()
                 self.api.place_market_order(
-                    side=direction,
+                    symbol=symbol,
+                    side="BUY",
+                    type="MARKET",
                     qty=position_size,
-                    symbol=self.symbol
                 )
-                risk_logger.info(f"Placed market order for {self.symbol} with quantity: {position_size}")
+                logger.info(f"Placed market order for {symbol} with quantity: {position_size}")
 
-                # # backup limit order at entry price 
-                # self.api.place_limit_order(
-                #     side=direction,
-                #     qty=position_size,
-                #     symbol=self.symbol,
-                #     price=entry_price, 
-                #     tif=settings.TIME_IN_FORCE_GTC
-                # )
-                risk_logger.info(f"Placed limit order for {self.symbol} at price: {entry_price}")
-
-                self.active_trades[self.symbol] = {
+                self.active_trades[symbol] = {
                     "entry_price": entry_price,
                     "quantity": position_size,
                     "trade_direction": self.trade_directions(direction)
                 }
-                
             except Exception as e:
-                risk_logger.error(f"Failed to place market order for {self.symbol}: {e}")
+                logger.error(f"Failed to place market order for {symbol}: {e}")
+                return
 
-    def manage_position(self, atr_multiplier=1.0):
-        positions = self.api.futures_position_information()
-        if positions is None or positions == 0:
-            risk_logger.info(f"No open positions.")
-            return 
-        
-        entry_price = float(positions['entryPrice'])
-        qty = float(positions['positionAmt'])
-        direction = positions['positionSide'] == 'LONG' if positions > 0 else "SHORT"
+    def manage_position(self, atr_multiplier=1.0, symbol: str):
+        portfolio_stats = self.portfolio_manager.get_portfolio_stats(symbol)
+        position = portfolio_stats['position']
+        entry_price = position['average_price']
+        qty = position['qty']
+        direction = "LONG" if qty>0 else "SHORT"
 
         atr = self.calculate_atr()
         risk = atr * atr_multiplier
         current_price = self.orderbook_df['mid_price'].iloc[-1]
         # risk reward ratio 
         r_multiple = (current_price - entry_price) / risk if direction == "LONG" else (entry_price - current_price) / risk
-            
-        # cancel old stop loss and take profit orders and create new ones
-        self.api.futures_cancel_all_open_orders(symbol=self.symbol)
 
         ## take profit and stop loss orders
-        # Return multiple - risk management strategy 
+        # return multiple - risk management strategy 
+        # track tp/sl 
+        new_tp = None
+        new_sl = None
+
         if direction == "LONG":
             if r_multiple >= 2.0:
-                sl = entry_price + risk 
-                tp = current_price + (2 * risk)
+                new_sl = entry_price + risk 
+                new_tp = current_price + (2 * risk)
             elif r_multiple >= 1.0:
-                sl = entry_price + (3 * risk)
-                tp = current_price + risk
+                new_sl = entry_price + (3 * risk)
+                new_tp = current_price + risk
         
         elif direction == "SHORT":
             if r_multiple >= 2.0:
-                sl = entry_price - risk 
-                tp = current_price - (2 * risk)
+                new_sl = entry_price - risk 
+                new_tp = current_price - (2 * risk)
             elif r_multiple >= 1.0:
-                sl = entry_price - (3 * risk)
-                tp = current_price - risk
+                new_sl = entry_price - (3 * risk)
+                new_tp = current_price - risk
+                
+        try:
+            # existing open orders
+            open_orders = self.api.get_open_orders(symbol=symbol)
 
-        
+            update_order = False # default
+            current_tp = None 
+            current_sl = None
 
-        # place new stop loss and take profit orders
-        self.api.place_stop_loss_order(
-            side=direction,
-            qty=qty,
-            symbol=self.symbol,
-            stop_price=sl,
-            price=sl,  # price for stop loss order
-            tif=settings.TIME_IN_FORCE_GTC
-        )
-        risk_logger.info(f"Placed stop loss order for {self.symbol} at price: {sl}")
-        self.api.place_take_profit_order(
-            side=direction,
-            qty=qty,
-            symbol=self.symbol,
-            stop_price=tp,
-            price=tp,  # price for take profit order
-            tif=settings.TIME_IN_FORCE_GTC
-        )
-        risk_logger.info(f"Placed take profit order for {self.symbol} at price: {tp}")
+            for order in open_orders:
+                if direction == "LONG":
+                    if order['type'] == 'STOP_MARKET' and order['side'] == 'SELL':
+                        current_sl = float(order['stopPrice'])
+                    elif order['type'] == 'TAKE_PROFIT_MARKET' and order['side'] == 'SELL':
+                        current_tp = float(order['stopPrice'])
+                elif direction == "SHORT":
+                    if order['type'] == 'STOP_MARKET' and order['side'] == 'BUY':
+                        current_sl = float(order['stopPrice'])
+                    elif order['type'] == 'TAKE_PROFIT_MARKET' and order['side'] == 'BUY':
+                        current_tp = float(order['stopPrice'])
+
+            # cancel tp if sl is filled (vice versa)
+            if current_sl is None and new_tp is not None:
+                self.api.cancel_order(symbol=symbol)
+                logger.info(f"Take profit filled for {symbol}, cancelling stop loss order.")
+                return
+            if current_tp is None and new_sl is not None:
+                self.api.cancel_order(symbol=symbol)
+                logger.info(f"Stop loss filled for {symbol}, cancelling take profit order.")
+                return
+
+            # check diff to see if we need to update orders
+            if abs(current_sl - new_sl) > 0.01 or abs(current_tp - new_tp) > 0.01:
+                update_order = True
+                logger.info(f"Updating stop loss and take profit orders for {symbol}.")
+
+            if update_order:
+                # cancel existing orders
+                self.api.cancel_open_orders(symbol=symbol)
+                logger.info(f"Cancelled existing orders for {symbol}.")
+                
+                # place new stop loss and take profit orders
+                self.api.place_stop_loss(
+                    side=direction,
+                    type="STOP_LOSS",
+                    qty=qty, # sell everything?
+                    symbol=symbol,
+                    price=new_sl, 
+                    tif=settings.TIME_IN_FORCE_GTC
+                )
+                logger.info(f"Placed stop loss order for {symbol} at price: {new_sl}")
+                
+                self.api.place_take_profit_order(
+                    side=direction,
+                    type="TAKE_PROFIT",
+                    qty=qty,
+                    symbol=symbol,
+                    price=new_tp,
+                    tif=settings.TIME_IN_FORCE_GTC
+                )
+                logger.info(f"Placed take profit order for {symbol} at price: {new_tp}")
+            
+        except Exception as e:
+            logger.error(f"Error managing position for {symbol}: {e}", exc_info=True)
+
             
     ## total portfolio risk
     def calculate_drawdown_limits(self) -> bool:
+        portfolio_value = self.portfolio_manager.get_total_portfolio_value()
+        if self.candlestick_df.empty:
+            logger.warning("No candlestick data available for drawdown calculations.")
+            return True
         peak_value = self.candlestick_df['high'].max() 
-        current_value = 
+        trough_value = self.candlestick_df['low'].min()
+        # init portfolio at the start of session
+        self.current_value = portfolio_value
 
-
-        if self.initial_value is None:
-            self.initial_value = current_value 
-        if self.peak_value is None or current_value>self.peak_value:
-            self.peak_value = current_value
-    
-        relative_dd = (current_value - self.peak_value)/ self.peak_value
-        absolute_dd = (self.initial_value - current_value)/ current_value
+        relative_dd = (peak_value - portfolio_value)/ peak_value
+        absolute_dd = (portfolio_value - self.current_value)/ self.current_value
         
         if relative_dd > self.max_relative_drawdown or absolute_dd > self.max_absolute_drawdown:
-            risk_logger.warning(f"Drawdown limits breached.")
+            logger.warning(f"Drawdown limits breached.")
             self.circuit_breaker.force_open(f"Drawdown limit breached. Relative dd: {relative_dd:.2%}, Absolute dd: {absolute_dd:.2%}.")
             for symbol, position in PortfolioManager.get_positions.items():
                 qty = position['qty']
                 try:
+                    # liquidate position
                     self.api.place_market_order(
                         side="SELL",
+                        type="MARKET",
                         qty=qty,
                         symbol=symbol
                     )
-                # place market sell order - liquidate assets
-                    risk_logger.info(f"Liquidated position for {symbol}:{qty} units.")
+                    logger.info(f"Liquidated position for {symbol}:{qty} units.")
                 except Exception as e:
-                    risk_logger.error(f"Unable to liquidate position for {symbol}: {e}.")
+                    logger.error(f"Unable to liquidate position for {symbol}: {e}.")
             return False
-        else:
-            return True 
+        return True 
         
-    def trade_directions(self, trade_signal:int) -> str:
-        if trade_signal == settings.SIGNAL_SCORE_BUY:
-            return "BUY"
-        elif trade_signal == settings.SIGNAL_SCORE_SELL:
-            return "SELL"
-        return "HOLD"
-    
+
     
 
             

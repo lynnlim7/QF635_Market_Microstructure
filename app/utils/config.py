@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     MAX_ABSOLUTE_DRAWDOWN: float = 0.10 # 10% equity
     MAX_RELATIVE_DRAWDOWN: float = 0.05 # 5% daily
     MAX_SPREAD_PCT: float = 0.003
+    MAX_EXPOSURE_PCT: float = 0.05 # 5%
 
     # Scoring Parameters
     SIGNAL_SCORE_BUY: float = 1.0
