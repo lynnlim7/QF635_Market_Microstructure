@@ -1,6 +1,7 @@
 # from binance import SIDE_BUY, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC
 import threading
 import time
+import asyncio
 
 from flask import Flask
 
@@ -8,6 +9,7 @@ from app.api.binance_api import BinanceApi
 from app.api.binance_gateway import BinanceGateway
 from app.order_management.order_manager import OrderManager
 from app.portfolio.portfolio_manager import PortfolioManager
+from app.analytics.TradeAnalysis import run_trade_analysis, get_trade_summary
 from app.risk.risk_manager import RiskManager
 from app.routes import register_routes
 from app.services import RedisPool
@@ -18,6 +20,7 @@ from app.queue_manager.locking_queue import LockingQueue
 from app.utils.config import settings
 from app.utils.func import get_execution_channel, get_orderbook_channel, get_candlestick_channel
 from app.utils.logger import main_logger as logger
+
 
 symbol = settings.SYMBOL
 
@@ -214,4 +217,5 @@ if __name__ == "__main__":
     threading.Thread(target=start_subscriber, daemon=True).start()
     threading.Thread(target=signal_consumer_loop, daemon=True).start()
     threading.Thread(target=order_consumer_loop, daemon=True).start()
+    threading.Thread(target=lambda: asyncio.run(run_trade_analysis()), daemon=True).start()
     main()
