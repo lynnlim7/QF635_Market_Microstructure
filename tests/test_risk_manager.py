@@ -13,422 +13,396 @@ from queue import Queue
 import threading
 from app.services import RedisPool
 from app.utils.func import get_execution_channel, get_orderbook_channel, get_candlestick_channel
+from app.services.circuit_breaker import RedisCircuitBreaker
+from app.queue_manager.locking_queue import LockingQueue
 
-# Ensure logs directory exists
-os.makedirs("./logs", exist_ok=True)
+class MockBinanceApi:
+    def __init__(self):
+        self.orders = []
+        self.open_orders = []
 
-symbol = "BTCUSDT"
+    def place_market_order(self, symbol, side, type, qty):
+        self.orders.append({
+            'symbol': symbol,
+            'side': side,
+            'type': type,
+            'qty': qty
+        })
+        return {'orderId': len(self.orders)}
+
+    def place_stop_loss(self, side, type, qty, symbol, price, tif):
+        order = {
+            'symbol': symbol,
+            'side': side,
+            'type': 'STOP_LOSS',  # Fixed type
+            'qty': qty,
+            'price': price,
+            'tif': tif,
+            'stopPrice': price  # Added stopPrice for stop orders
+        }
+        self.open_orders.append(order)
+        return {'orderId': len(self.open_orders)}
+
+    def place_take_profit_order(self, side, type, qty, symbol, price, tif):
+        order = {
+            'symbol': symbol,
+            'side': side,
+            'type': 'TAKE_PROFIT',  # Fixed type
+            'qty': qty,
+            'price': price,
+            'tif': tif,
+            'stopPrice': price  # Added stopPrice for take profit orders
+        }
+        self.open_orders.append(order)
+        return {'orderId': len(self.open_orders)}
+
+    def get_open_orders(self, symbol):
+        return self.open_orders
+
+    def cancel_open_orders(self, symbol):
+        self.open_orders = []
+        return True
+
+    def cancel_order(self, symbol):
+        if self.open_orders:
+            self.open_orders.pop()
+        return True
+
+class MockCircuitBreaker:
+    def __init__(self):
+        self.is_open = False
+
+    def allow_request(self):
+        return not self.is_open
+
+    def force_open(self, reason):
+        self.is_open = True
 
 @pytest.fixture
-def setup_risk():
-    """Fixture to set up risk manager and its dependencies"""
-    api = BinanceGateway(symbol=symbol)
-    portfolio_manager = PortfolioManager(starting_cash=10000.0)
+def mock_api():
+    return MockBinanceApi()
 
-    signal_queue = Queue()
-    trade_signal = MACDStrategy(symbol)
-    trade_direction = MACDStrategy(symbol)
-    
-    risk_manager = RiskManager(
-        api=api,
+@pytest.fixture
+def mock_circuit_breaker():
+    return MockCircuitBreaker()
+
+@pytest.fixture
+def portfolio_manager():
+    return PortfolioManager()
+
+@pytest.fixture
+def risk_manager(mock_api, portfolio_manager, mock_circuit_breaker):
+    return RiskManager(
+        symbol="BTCUSDT",
+        api=mock_api,
         portfolio_manager=portfolio_manager,
-        trade_signal=trade_signal,
-        trade_direction=trade_direction
+        circuit_breaker=mock_circuit_breaker,
+        max_risk_per_trade_pct=0.02,
+        max_absolute_drawdown=0.1,
+        max_relative_drawdown=0.15,
+        max_exposure_pct=0.5
     )
-    
+
+def create_mock_orderbook_data(symbol="BTCUSDT", timestamp=None):
+    if timestamp is None:
+        timestamp = int(time.time() * 1000)
     return {
-        'risk_manager': risk_manager,
-        'signal_queue': signal_queue,
-        'trade_signal': trade_signal,
-        'trade_direction': trade_direction,
-        'symbol': symbol
+        'symbol': symbol,
+        'timestamp': timestamp,
+        'bids': [{'price': '50000.0', 'quantity': '1.0'}],
+        'asks': [{'price': '50001.0', 'quantity': '1.0'}]
     }
 
-def test_strategy_signal_flow(setup_risk):
-    """Test the flow of signals from strategy to risk manager"""
-    risk_manager = setup_risk['risk_manager']
-    signal_queue = setup_risk['signal_queue']
-    trade_signal = setup_risk['trade_signal']
-    
-    test_signals = [
-        settings.SIGNAL_SCORE_BUY,   
-        settings.SIGNAL_SCORE_SELL,   
-        settings.SIGNAL_SCORE_HOLD    
-    ]
-    
-    for signal in test_signals:
-        # Put signal in queue
-        signal_queue.put(signal)
-        
-        # Process signal in risk manager
-        risk_manager.accept_signal(signal)
-        
-        # Verify signal was processed
-        current_signal = trade_signal.generate_signal()
-        assert current_signal in [1.0, -1.0, 0], f"Signal mismatch. Expected {signal}, got {current_signal}"
+def create_mock_candlestick_data(symbol="BTCUSDT", timestamp=None):
+    if timestamp is None:
+        timestamp = int(time.time() * 1000)
+    return {
+        'symbol': symbol,
+        'start_time': timestamp,
+        'open': '50000.0',
+        'high': '50100.0',
+        'low': '49900.0',
+        'close': '50050.0',
+        'volume': '100.0'
+    }
 
-def test_market_data_flow(setup_risk):
-    """Test market data processing and risk calculations"""
-    risk_manager = setup_risk['risk_manager']
-    symbol = setup_risk['symbol']
-    
-    try:
-        # Initialize Redis connection
-        redis_pool = RedisPool()
-        publisher = redis_pool.create_publisher()
-        
-        # Setup Redis channels
-        redis_channels = [
-            get_candlestick_channel(symbol.lower()),
-            get_orderbook_channel(symbol.lower()),
-            get_execution_channel(symbol.lower())
-        ]
-        
-        # Start Binance connection in a separate thread
-        def start_binance():
-            try:
-                gateway = BinanceGateway(symbol=symbol, redis_publisher=publisher)
-                gateway.connection()
-                print("Binance connection established")
-            except Exception as e:
-                print(f"Error connecting to Binance: {str(e)}")
-                raise
-        
-        binance_thread = threading.Thread(target=start_binance, daemon=True)
-        binance_thread.start()
-        
-        # Wait for Binance connection
-        time.sleep(2)  # Give time for connection to establish
-        
-        # Start subscriber in a separate thread
-        def start_subscriber():
-            try:
-                subscriber = redis_pool.create_subscriber(redis_channels)
-                
-                # Register handlers
-                for channel in redis_channels:
-                    if "candlestick" in channel:
-                        subscriber.register_handler(channel, risk_manager.process_candlestick)
-                    if "orderbook" in channel:
-                        subscriber.register_handler(channel, risk_manager.data_aggregator)
-                    if "execution" in channel:
-                        subscriber.register_handler(channel, lambda x: print(f"Execution update: {x}"))
-                
-                subscriber.start_subscribing()
-                print("Redis subscriber started")
-            except Exception as e:
-                print(f"Error starting subscriber: {str(e)}")
-                raise
-        
-        subscriber_thread = threading.Thread(target=start_subscriber, daemon=True)
-        subscriber_thread.start()
-        
-        # Wait for initial data with timeout
-        max_wait = 10  # Maximum wait time in seconds
-        start_time = time.time()
-        while time.time() - start_time < max_wait:
-            if not risk_manager.orderbook_df.empty and not risk_manager.candlestick_df.empty:
-                # Check if we have enough data points for volatility calculation
-                if len(risk_manager.candlestick_df) >= 2:  
-                    break
-            print(f"Waiting for data... Current candlesticks: {len(risk_manager.candlestick_df)}")
-            time.sleep(0.5)  # Check every 500ms
-        
-        if len(risk_manager.candlestick_df)<2:
-            print("No real-time candles received. Use dummy data...")
-            now = pd.Timestamp.utcnow().floor('min')
-            candles = pd.DataFrame({
-                'datetime': [now - pd.Timedelta(minutes=i) for i in range(20)][::-1],
-                'open': np.linspace(100, 120, 20),
-                'high': np.linspace(101, 121, 20),
-                'low': np.linspace(99, 119, 20),
-                'close': np.linspace(100, 120, 20),
-                'volume': [1.0] * 20,
-                'symbol': ["BTCUSDT"] * 20,
-                'interval': ["1m"] * 20,
-                'start_time': [0] * 20,
-                'end_time': [0] * 20,
-                'source': ["synthetic"] * 20,
-                'is_closed': [True] * 20
-            }).set_index('datetime')
-            risk_manager.candlestick_df = candles
-        
-        # Verify data is being received
-        assert not risk_manager.orderbook_df.empty, "No orderbook data received within timeout"
-        assert not risk_manager.candlestick_df.empty, "No candlestick data received within timeout"
-        assert len(risk_manager.candlestick_df) >= 2, "Insufficient candlestick data for volatility calculation"
-        
-        # Print data status
-        print(f"Received {len(risk_manager.candlestick_df)} candlesticks")
-        print(f"Received {len(risk_manager.orderbook_df)} orderbook updates")
-        
-        # Test volatility calculation with live data
-        vol = risk_manager.calculate_rolling_vol()
-        assert vol is not None, "Volatility calculation failed"
-        print(f"Calculated volatility from live data: {vol:.4f}")
-        
-        # Print latest market data
-        print(f"Latest mid price: {risk_manager.orderbook_df['mid_price'].iloc[-1]}")
-        print(f"Latest spread: {risk_manager.orderbook_df['spread_pct'].iloc[-1]:.6f}")
-        print(f"Latest candlestick close: {risk_manager.candlestick_df['close'].iloc[-1]}")
-        
-    except Exception as e:
-        pytest.fail(f"Test failed with error: {str(e)}")
-    finally:
-        try:
-            redis_pool.close()
-        except Exception as e:
-            print(f"Error during cleanup: {str(e)}")
+def create_mock_trade_data(symbol="BTCUSDT", side="BUY", qty=1.0, price=50000.0):
+    return {
+        'symbol': symbol,
+        'order_id': 12345,
+        'client_order_id': 'test_order_123',
+        'side': side,
+        'position_side': 'BOTH',
+        'exec_type': 'TRADE',
+        'status': 'FILLED',
+        'order_type': 'MARKET',
+        'time_in_force': 'GTC',
+        'orig_qty': str(qty),
+        'cum_filled_qty': str(qty),
+        'avg_price': str(price),
+        'last_qty': str(qty),
+        'last_price': str(price),
+        'commission': '0.1',
+        'realized_pnl': '0.0',
+        'is_maker': False,
+        'event_time_ms': int(time.time() * 1000),
+        'trade_time_ms': int(time.time() * 1000),
+        'stop_price': '0.0',
+        'activation_price': '0.0',
+        'callback_rate': '0.0'
+    }
 
-def test_position_sizing(setup_risk):
-    """Test position sizing calculation"""
-    risk_manager = setup_risk['risk_manager']
-    now = pd.Timestamp.utcnow().floor('min')
-    candles = pd.DataFrame({
-        'datetime': [now - pd.Timedelta(minutes=i) for i in range(20)][::-1],
-        'open': np.linspace(100, 120, 20),
-        'high': np.linspace(101, 121, 20),
-        'low': np.linspace(99, 119, 20),
-        'close': np.linspace(100, 120, 20),
-        'volume': [1.0] * 20,
-        'symbol': ["BTCUSDT"] * 20,
-        'interval': ["1m"] * 20,
-        'start_time': [0] * 20,
-        'end_time': [0] * 20,
-        'source': ["synthetic"] * 20,
-        'is_closed': [True] * 20
-        }).set_index('datetime')
-    risk_manager.candlestick_df = candles
-    
-    # Get current ATR
-    atr = risk_manager.calculate_atr()
-    assert atr is not None, "ATR calculation failed"
-    
-    # Calculate position size
-    position_size = risk_manager.calculate_position_size()
-    assert position_size > 0, "Invalid position size calculated"
+class TestRiskManager:
+    def test_process_orderbook(self, risk_manager):
+        # Test orderbook processing
+        orderbook_data = create_mock_orderbook_data()
+        risk_manager.process_orderbook(orderbook_data)
+        
+        assert "BTCUSDT" in risk_manager.df_orderbook
+        assert not risk_manager.df_orderbook["BTCUSDT"].empty
+        assert risk_manager.df_orderbook["BTCUSDT"].iloc[-1]['mid_price'] == 50000.5
 
-def test_drawdown_limits(setup_risk):
-    """Test drawdown limit calculations"""
-    risk_manager = setup_risk['risk_manager']
-    
-    # Get current portfolio value
-    current_prices = risk_manager.portfolio_manager.get_cash()
-    
-    # Test drawdown limits
-    drawdown_check = risk_manager.calculate_drawdown_limits(current_prices, order=None)
-    assert isinstance(drawdown_check, bool), "Drawdown check should return boolean"
+    def test_process_candlestick(self, risk_manager):
+        # Test candlestick processing
+        candlestick_data = create_mock_candlestick_data()
+        risk_manager.process_candlestick(candlestick_data)
+        
+        assert "BTCUSDT" in risk_manager.df_candlestick
+        assert not risk_manager.df_candlestick["BTCUSDT"].empty
+        assert risk_manager.df_candlestick["BTCUSDT"].iloc[-1]['close'] == 50050.0
 
-# def test_circuit_breaker(setup_risk):
-#     """Test circuit breaker functionality"""
-#     risk_manager = setup_risk['risk_manager']
-    
-#     # Test circuit breaker activation
-#     risk_manager.trigger_circuit_breaker("Test activation")
-#     assert risk_manager.circuit_breaker, "Circuit breaker not activated"
-    
-#     # Test position entry with circuit breaker active
-#     current_prices = risk_manager.portfolio_manager.get_cash()
-#     entry_result = risk_manager.entry_position(50000.0, current_prices, risk_manager.api)
-#     assert entry_result is None, "Position entry should be blocked by circuit breaker"
+    def test_calculate_atr(self, risk_manager):
+        # Create multiple candlesticks to calculate ATR
+        for i in range(20):
+            timestamp = int(time.time() * 1000) - (20 - i) * 60000
+            candlestick_data = create_mock_candlestick_data(timestamp=timestamp)
+            risk_manager.process_candlestick(candlestick_data)
+        
+        atr = risk_manager.calculate_atr()
+        assert atr is not None
+        assert atr > 0
 
-def test_stop_loss_take_profit(setup_risk):
-    """Test stop loss and take profit calculations"""
-    risk_manager = setup_risk['risk_manager']
-    now = pd.Timestamp.utcnow().floor('min')
-    candles = pd.DataFrame({
-        'datetime': [now - pd.Timedelta(minutes=i) for i in range(20)][::-1],
-        'open': np.linspace(100, 120, 20),
-        'high': np.linspace(101, 121, 20),
-        'low': np.linspace(99, 119, 20),
-        'close': np.linspace(100, 120, 20),
-        'volume': [1.0] * 20,
-        'symbol': ["BTCUSDT"] * 20,
-        'interval': ["1m"] * 20,
-        'start_time': [0] * 20,
-        'end_time': [0] * 20,
-        'source': ["synthetic"] * 20,
-        'is_closed': [True] * 20
-        }).set_index('datetime')
-    risk_manager.candlestick_df = candles
-    
-    entry_price = 50000.0
-    atr = risk_manager.calculate_atr()
-    assert atr is not None, "ATR calculation failed"
-    
-    tp, sl = risk_manager.calc_tp_sl(entry_price, atr.iloc[-1], "LONG")
-    assert sl < entry_price, "Stop loss should be below entry price"
-    assert tp > entry_price, "Take profit should be above entry price"
-
-def test_full_workflow(setup_risk):
-    """Test complete risk management workflow with strategy integration"""
-    risk_manager = setup_risk['risk_manager']
-    signal_queue = setup_risk['signal_queue']
-    symbol = setup_risk['symbol']
-    
-    try:
-        # Initialize Redis connection
-        redis_pool = RedisPool()
-        publisher = redis_pool.create_publisher()
+    def test_calculate_position_size(self, risk_manager):
+        # Setup required data
+        orderbook_data = create_mock_orderbook_data()
+        risk_manager.process_orderbook(orderbook_data)
         
-        # Setup Redis channels
-        redis_channels = [
-            get_candlestick_channel(symbol.lower()),
-            get_orderbook_channel(symbol.lower()),
-            get_execution_channel(symbol.lower())
-        ]
+        for i in range(20):
+            timestamp = int(time.time() * 1000) - (20 - i) * 60000
+            candlestick_data = create_mock_candlestick_data(timestamp=timestamp)
+            risk_manager.process_candlestick(candlestick_data)
         
-        # Start Binance connection in a separate thread
-        def start_binance():
-            try:
-                gateway = BinanceGateway(symbol=symbol, redis_publisher=publisher)
-                gateway.connection()
-                print("Binance connection established")
-            except Exception as e:
-                print(f"Error connecting to Binance: {str(e)}")
-                raise
-        
-        binance_thread = threading.Thread(target=start_binance, daemon=True)
-        binance_thread.start()
-        
-        # Wait for Binance connection
-        time.sleep(2)
-        
-        # Start subscriber in a separate thread
-        def start_subscriber():
-            try:
-                subscriber = redis_pool.create_subscriber(redis_channels)
-                
-                # Register handlers
-                for channel in redis_channels:
-                    if "candlestick" in channel:
-                        subscriber.register_handler(channel, risk_manager.process_candlestick)
-                    if "orderbook" in channel:
-                        subscriber.register_handler(channel, risk_manager.data_aggregator)
-                    if "execution" in channel:
-                        subscriber.register_handler(channel, lambda x: print(f"Execution update: {x}"))
-                
-                subscriber.start_subscribing()
-                print("Redis subscriber started")
-            except Exception as e:
-                print(f"Error starting subscriber: {str(e)}")
-                raise
-        
-        subscriber_thread = threading.Thread(target=start_subscriber, daemon=True)
-        subscriber_thread.start()
-        
-        # Wait for initial data with timeout
-        max_wait = 5
-        start_time = time.time()
-        while time.time() - start_time < max_wait:
-            if not risk_manager.orderbook_df.empty and not risk_manager.candlestick_df.empty:
-                break
-            print(f"Waiting for data... Current orderbook updates: {len(risk_manager.orderbook_df)}")
-            time.sleep(0.5)
-        
-        if risk_manager.orderbook_df.empty:
-            print("No real-time orderbook data received. Using dummy data...")
-            now = pd.Timestamp.utcnow()
-            orderbook_data = pd.DataFrame([{
-                "timestamp": now,
-                "best_bid": 50000.0,
-                "best_ask": 50001.0,
-                "mid_price": 50000.5,
-                "spread": 1.0,
-                "spread_pct": 0.00002
-            }]).set_index("timestamp")
-            risk_manager.orderbook_df = orderbook_data
-        
-        if risk_manager.candlestick_df.empty:
-            print("No real-time candles received. Using dummy data...")
-            now = pd.Timestamp.utcnow().floor('min')
-            candles = pd.DataFrame({
-                'datetime': [now - pd.Timedelta(minutes=i) for i in range(20)][::-1],
-                'open': np.linspace(100, 120, 20),
-                'high': np.linspace(101, 121, 20),
-                'low': np.linspace(99, 119, 20),
-                'close': np.linspace(100, 120, 20),
-                'volume': [1.0] * 20,
-                'symbol': ["BTCUSDT"] * 20,
-                'interval': ["1m"] * 20,
-                'start_time': [0] * 20,
-                'end_time': [0] * 20,
-                'source': ["synthetic"] * 20,
-                'is_closed': [True] * 20
-            }).set_index('datetime')
-            risk_manager.candlestick_df = candles
-        
-        # Verify data is available
-        assert not risk_manager.orderbook_df.empty, "No orderbook data available"
-        assert not risk_manager.candlestick_df.empty, "No candlestick data available"
-        
-        # 2. Position Sizing
         position_size = risk_manager.calculate_position_size()
-        assert position_size > 0, "Invalid position size calculated"
-        print(f"Calculated position size: {position_size:.4f}")
-        
-        # 3. Risk Checks
-        current_cash = risk_manager.portfolio_manager.get_cash()
-        drawdown_check = risk_manager.calculate_drawdown_limits(current_cash, order=None)
-        assert isinstance(drawdown_check, bool), "Drawdown check should return boolean"
-        print(f"Drawdown check passed: {drawdown_check}")
-        
-        # 4. Strategy Signal and Entry Decision
-        # Update strategy with latest data
-        latest_candle = risk_manager.candlestick_df.iloc[-1].to_dict()
-        risk_manager.trade_signal.update_data(latest_candle)
-        
-        # Generate and process signal
-        signal = risk_manager.trade_signal.generate_signal()
-        risk_manager.accept_signal(signal)
-        print(f"Generated and processed signal: {signal}")
-        
-        if drawdown_check:
-            entry_result = risk_manager.entry_position(50000.0, current_cash, risk_manager.api)
-            if entry_result:
-                tp, sl = entry_result
-                assert sl < 50000.0, "Stop loss should be below entry price"
-                assert tp > 50000.0, "Take profit should be above entry price"
-                print(f"Entry position calculated - TP: {tp:.2f}, SL: {sl:.2f}")
-        
-        # 5. Position Management
-        positions = risk_manager.portfolio_manager.get_positions()
-        if positions:
-            risk_manager.manage_position(50000.0, current_cash)
-            assert risk_manager.portfolio_manager.get_positions() is not None, "Position management should be active"
-            print("Position management active")
-        
-    except Exception as e:
-        pytest.fail(f"Test failed with error: {str(e)}")
-    finally:
-        try:
-            redis_pool.close()
-        except Exception as e:
-            print(f"Error during cleanup: {str(e)}")
+        assert position_size is not None
+        assert position_size > 0
 
-def main():
-    """Run all tests"""
-    test = TestRiskManager()
-    setup = test.setup()
-    
-    print("\n=== Testing Market Data Flow ===")
-    test.test_market_data_flow(setup)
-    
-    print("\n=== Testing Position Sizing ===")
-    test.test_position_sizing(setup)
-    
-    print("\n=== Testing Drawdown Limits ===")
-    test.test_drawdown_limits(setup)
-    
-    print("\n=== Testing Circuit Breaker ===")
-    test.test_circuit_breaker(setup)
-    
-    print("\n=== Testing Stop Loss/Take Profit ===")
-    test.test_stop_loss_take_profit(setup)
-    
-    print("\n=== Testing Full Workflow ===")
-    test.test_full_workflow(setup)
+    def test_accept_signal(self, risk_manager):
+        # Setup required data
+        orderbook_data = create_mock_orderbook_data()
+        risk_manager.process_orderbook(orderbook_data)
+        
+        # Setup candlestick data for ATR calculation
+        for i in range(20):
+            timestamp = int(time.time() * 1000) - (20 - i) * 60000
+            candlestick_data = create_mock_candlestick_data(timestamp=timestamp)
+            risk_manager.process_candlestick(candlestick_data)
+        
+        # Setup portfolio stats with some initial value
+        trade_data = create_mock_trade_data(side="BUY", qty=0.1, price=50000.0)
+        risk_manager.portfolio_manager.on_new_trade(trade_data)
+        
+        # Update portfolio with some PnL and market price
+        risk_manager.portfolio_manager.realized_pnl = 1000.0  # Add some realized PnL
+        risk_manager.portfolio_manager.unrealized_pnl = {"BTCUSDT": 500.0}  # Add some unrealized PnL
+        
+        # Update market price in portfolio manager
+        price_data = {
+            'contract_name': 'btcusdt',
+            'bids': [{'price': 50000.0, 'quantity': 1.0}],
+            'asks': [{'price': 50001.0, 'quantity': 1.0}]
+        }
+        risk_manager.portfolio_manager.on_new_price(price_data)
+        
+        # Ensure orderbook data is properly set in risk manager
+        current_time = pd.Timestamp.now()
+        risk_manager.df_orderbook = {
+            "BTCUSDT": pd.DataFrame([{
+                'timestamp': current_time,
+                'symbol': 'BTCUSDT',
+                'best_bid': 50000.0,
+                'best_ask': 50001.0,
+                'mid_price': 50000.5,
+                'spread': 1.0,
+                'spread_pct': 0.00002
+            }]).set_index('timestamp')
+        }
+        
+        # Ensure position is properly set in portfolio manager
+        risk_manager.portfolio_manager.positions = {
+            "BTCUSDT": {
+                'qty': 0.1,
+                'average_price': 50000.0
+            }
+        }
+        
+        # Print debug information
+        print("Portfolio stats before signal:", risk_manager.portfolio_manager.get_portfolio_stats_by_symbol("BTCUSDT"))
+        print("Orderbook data:", risk_manager.df_orderbook["BTCUSDT"])
+        
+        # Test buy signal
+        direction = risk_manager.accept_signal(1, "BTCUSDT")  # 1 for buy
+        print("Signal direction:", direction)
+        assert direction == "BUY"
+        
+        # Test sell signal
+        direction = risk_manager.accept_signal(-1, "BTCUSDT")  # -1 for sell
+        assert direction == "SELL"
+        
+        # Test hold signal
+        direction = risk_manager.accept_signal(0, "BTCUSDT")  # 0 for hold
+        assert direction is None
+        
+        # Test max exposure limit
+        # Create a large position to trigger max exposure
+        large_trade = create_mock_trade_data(side="BUY", qty=10.0, price=50000.0)
+        risk_manager.portfolio_manager.on_new_trade(large_trade)
+        direction = risk_manager.accept_signal(1, "BTCUSDT")
+        assert direction is None  # Should return None due to max exposure
 
+    def test_entry_position(self, risk_manager):
+        # Setup required data
+        orderbook_data = create_mock_orderbook_data()
+        risk_manager.process_orderbook(orderbook_data)
+        
+        for i in range(20):
+            timestamp = int(time.time() * 1000) - (20 - i) * 60000
+            candlestick_data = create_mock_candlestick_data(timestamp=timestamp)
+            risk_manager.process_candlestick(candlestick_data)
+        
+        # Test entry position
+        entry_signal = risk_manager.entry_position("BTCUSDT", "BUY")
+        assert entry_signal is not None
+        stop_loss, take_profit = entry_signal
+        assert stop_loss < take_profit
 
-if __name__ == "__main__":
-    main()
+    def test_manage_position(self, risk_manager):
+        # Setup required data
+        orderbook_data = create_mock_orderbook_data()
+        risk_manager.process_orderbook(orderbook_data)
+        
+        # Setup candlestick data for ATR calculation
+        for i in range(20):
+            timestamp = int(time.time() * 1000) - (20 - i) * 60000
+            candlestick_data = create_mock_candlestick_data(timestamp=timestamp)
+            risk_manager.process_candlestick(candlestick_data)
+        
+        # Verify ATR calculation
+        atr = risk_manager.calculate_atr()
+        print("\nATR value:", atr)
+        assert atr is not None, "ATR calculation failed"
+        
+        # Create a position first
+        trade_data = create_mock_trade_data(side="BUY", qty=1.0, price=50000.0)
+        risk_manager.portfolio_manager.on_new_trade(trade_data)
+        
+        # Update market price in portfolio manager
+        price_data = {
+            'contract_name': 'btcusdt',
+            'bids': [{'price': 50000.0, 'quantity': 1.0}],
+            'asks': [{'price': 50001.0, 'quantity': 1.0}]
+        }
+        risk_manager.portfolio_manager.on_new_price(price_data)
+        
+        # Ensure orderbook data is properly set in risk manager
+        current_time = pd.Timestamp.now()
+        df_orderbook = pd.DataFrame([{
+            'timestamp': current_time,
+            'symbol': 'BTCUSDT',
+            'best_bid': 50000.0,
+            'best_ask': 50001.0,
+            'mid_price': 50000.5,
+            'spread': 1.0,
+            'spread_pct': 0.00002
+        }]).set_index('timestamp')
+        
+        # Print debug information before setting orderbook
+        print("\nBefore setting orderbook:")
+        print("df_orderbook shape:", df_orderbook.shape)
+        print("df_orderbook columns:", df_orderbook.columns)
+        print("df_orderbook data:", df_orderbook)
+        
+        risk_manager.df_orderbook = {"BTCUSDT": df_orderbook}
+        
+        # Print debug information after setting orderbook
+        print("\nAfter setting orderbook:")
+        print("df_orderbook keys:", risk_manager.df_orderbook.keys())
+        print("BTCUSDT data:", risk_manager.df_orderbook["BTCUSDT"])
+        
+        # Ensure position is properly set in portfolio manager
+        risk_manager.portfolio_manager.positions = {
+            "BTCUSDT": {
+                'qty': 1.0,
+                'average_price': 50000.0
+            }
+        }
+        
+        # Update portfolio with some unrealized PnL to trigger position management
+        risk_manager.portfolio_manager.unrealized_pnl = {"BTCUSDT": 100.0}
+        
+        # Print debug information
+        print("\nPortfolio stats before management:", risk_manager.portfolio_manager.get_portfolio_stats_by_symbol("BTCUSDT"))
+        
+        # Calculate expected stop loss and take profit levels
+        entry_price = 50000.0
+        current_price = 50000.5
+        risk = atr * 1.0  # Using atr_multiplier=1.0
+        
+        # For a long position with positive PnL
+        expected_sl = entry_price - risk  # Initial stop loss
+        expected_tp = current_price + (2 * risk)  # Initial take profit
+        
+        print("\nExpected levels:")
+        print(f"Entry price: {entry_price}")
+        print(f"Current price: {current_price}")
+        print(f"ATR: {atr}")
+        print(f"Risk: {risk}")
+        print(f"Expected stop loss: {expected_sl}")
+        print(f"Expected take profit: {expected_tp}")
+        
+        # Test position management
+        risk_manager.manage_position("BTCUSDT", atr_multiplier=1.0)
+        
+        # Print debug information
+        print("\nOpen orders:", risk_manager.api.open_orders)
+        
+        # Verify that stop loss and take profit orders were placed
+        assert len(risk_manager.api.open_orders) > 0, "No orders were placed"
+        
+        # Verify the types of orders placed
+        order_types = [order['type'] for order in risk_manager.api.open_orders]
+        print("\nOrder types placed:", order_types)
+        assert 'STOP_LOSS' in order_types, "No stop loss order was placed"
+        assert 'TAKE_PROFIT' in order_types, "No take profit order was placed"
+        
+        # Verify order prices
+        for order in risk_manager.api.open_orders:
+            print(f"\nOrder details: {order}")
+            if order['type'] == 'STOP_LOSS':
+                assert abs(float(order['stopPrice']) - expected_sl) < 0.1, f"Stop loss price {order['stopPrice']} does not match expected {expected_sl}"
+            elif order['type'] == 'TAKE_PROFIT':
+                assert abs(float(order['stopPrice']) - expected_tp) < 0.1, f"Take profit price {order['stopPrice']} does not match expected {expected_tp}"
+
+    def test_calculate_drawdown_limits(self, risk_manager):
+        # Setup required data
+        orderbook_data = create_mock_orderbook_data()
+        risk_manager.process_orderbook(orderbook_data)
+        
+        for i in range(20):
+            timestamp = int(time.time() * 1000) - (20 - i) * 60000
+            candlestick_data = create_mock_candlestick_data(timestamp=timestamp)
+            risk_manager.process_candlestick(candlestick_data)
+        
+        # Test drawdown limits
+        current_prices = {"BTCUSDT": 50000.0}
+        result = risk_manager.calculate_drawdown_limits("BTCUSDT", current_prices)
+        assert result is True  # Should be True as no drawdown has occurred yet

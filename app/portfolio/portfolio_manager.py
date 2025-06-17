@@ -144,10 +144,14 @@ class PortfolioManager:
         return
 
 
-
     # State Accessors
-    # def get_unrealised_pnl(self):
-    #     return self.get_realized_pnl()
+    def get_unrealised_pnl(self):
+        return sum(self.unrealized_pnl.values())
+
+    def get_total_pnl(self) -> float:
+        unrealized_pnl = 0.0
+        unrealized_total = sum(self.unrealized_pnl.values()) 
+        return self.realized_pnl + unrealized_total
 
     def get_portfolio_stats_by_symbol(self, symbol: str):
         if not symbol:
@@ -158,7 +162,7 @@ class PortfolioManager:
             'last_market_price': self.last_market_price.get(symbol.upper()),
             'realized_pnl': self.realized_pnl,
             'total_commissions': self.total_commissions,
-            'total_pnl': self.total_pnl
+            'total_pnl': self.get_total_pnl()
         }
 
     def get_positions(self):
@@ -166,27 +170,6 @@ class PortfolioManager:
 
     def get_realized_pnl(self):
         return self.realized_pnl
-
-    def get_unrealized_pnl(self, current_prices: dict):
-        pnl = 0.0
-        for sym, pos in self.positions.items():
-            if sym in current_prices:
-                market_price = current_prices[sym]
-                pnl += (market_price - pos["entry_price"]) * pos["qty"]
-        return pnl
-
-    def get_total_portfolio_value(self, current_prices: dict):
-        cash = self.cash
-        position_value = 0.0
-        for sym, pos in self.positions.items():
-            if sym in current_prices:
-                market_price = current_prices[sym]
-                position_value += market_price * pos["qty"]
-
-        realized_pnl = self.get_realized_pnl()
-        return cash + position_value + realized_pnl 
-
-
 
 if __name__=="__main__" :
     symbol = 'BTCUSDT'

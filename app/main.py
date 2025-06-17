@@ -37,17 +37,16 @@ strategy_instance: BaseStrategy | None = None
 binance_api = BinanceApi(settings.SYMBOL)
 
 redis_pool = RedisPool()
-redis_pool.create_circuit_breaker()
+# redis_pool.create_circuit_breaker()
 
 circuit_breaker = redis_pool.create_circuit_breaker()
 publisher = redis_pool.create_publisher()
 portfolio_manager = PortfolioManager()
 risk_manager = RiskManager(
+    symbol=symbol,
     api=binance_api,
     portfolio_manager=portfolio_manager,
-    circuit_breaker=redis_pool.circuit_breaker, # clean up this part,
-    trade_signal=MACDStrategy(symbol),
-    trade_direction=MACDStrategy(symbol)
+    circuit_breaker=circuit_breaker
 )
 
 order_manager = OrderManager(
@@ -80,8 +79,9 @@ def start_subscriber():
     logger.info("Starting subscriber now")
     ## subscribe to redis channel
     subscriber = redis_pool.create_subscriber(redis_channels)
+    logger.info(f"Created Redis subscriber for channels: {redis_channels}")
+    
     # register handler for diff modules
-
     global strategy_instance
     while strategy_instance is None:
         logger.info("Waiting for strategy to start")
@@ -91,20 +91,26 @@ def start_subscriber():
     global order_manager
 
     for channel in redis_channels:
+        logger.info(f"Registering handlers for channel: {channel}")
         if "candlestick" in channel:
             subscriber.register_handler(channel, strategy_instance.update_data)
             subscriber.register_handler(channel, risk_manager.process_candlestick)
+            logger.info(f"Registered candlestick handlers for {channel}")
 
         if "execution" in channel:
             subscriber.register_handler(channel, handle_execution_updates)
             subscriber.register_handler(channel, portfolio_manager.on_new_trade)
+            logger.info(f"Registered execution handlers for {channel}")
 
         if "orderbook" in channel:
             subscriber.register_handler(channel, handle_order_book_quote)
             subscriber.register_handler(channel, portfolio_manager.on_new_price)
-
-        
+            subscriber.register_handler(channel, risk_manager.process_orderbook)
+            logger.info(f"Registered orderbook handlers for {channel}")
+    
+    logger.info("Starting Redis subscriber...")
     subscriber.start_subscribing()
+    logger.info("Redis subscriber started")
 
 def start_flask():
     # global app
@@ -115,13 +121,12 @@ def signal_callback(signal: int):
     logger.info(f"Signal pushed to queue: {signal}")
     signal_queue.push(signal)
 
-#TODO: fix - risk unable to accept signal
 def signal_consumer_loop():
     while True:
         if not signal_queue.is_empty():
             signal = signal_queue.pop()
             if signal is not None:
-                risk_manager.accept_signal(signal)
+                risk_manager.accept_signal(signal, symbol)
         time.sleep(1)
 
 def order_consumer_loop():
@@ -149,48 +154,53 @@ def main():
                 time.sleep(5)
                 continue
 
-            orderbook_data = risk_manager.orderbook_df
-            price_data = risk_manager.candlestick_df
+            current_prices = {}
+            
+            orderbook_data = risk_manager.df_orderbook.get(symbol)
+            price_data = risk_manager.df_candlestick.get(symbol)
 
-            if price_data is not None and len(price_data) != 0:
-                # current_price = float(price_data['close'].iloc[-1])
-                # current_prices = {settings.SYMBOL: current_price}
-                logger.info(f"Current price: {current_price:.4f}")
+            if orderbook_data is not None and len(orderbook_data) > 0:
+                current_price = orderbook_data['mid_price'].iloc[-1]
+                current_prices[symbol] = current_price
+                logger.info(f"Current mid price for {symbol}: {current_price:.4f}")
 
-                vol = risk_manager.calculate_rolling_vol()
                 atr = risk_manager.calculate_atr()
                 position_size = risk_manager.calculate_position_size()
 
-                if vol is not None:
-                    logger.info(f"Volatility: {vol:.4f}")
                 if atr is not None:
                     logger.info(f"Average True Range: {atr:.4f}")
                 if position_size is not None:
                     logger.info(f"Position Size: {position_size:.4f}")
 
-                drawdown_limit_check = risk_manager.calculate_drawdown_limits(current_prices)
+                drawdown_limit_check = risk_manager.calculate_drawdown_limits(symbol, current_prices)
                 if drawdown_limit_check == False:
                     logger.warning("Drawdown limits breached. Opening circuit breaker.")
                     circuit_breaker.force_open("Drawdown limits breached.")
                     continue
 
-                entry_signal = risk_manager.entry_position(
-                    current_price=current_price,
-                    current_prices=current_prices,
-                )
+                portfolio_stats = risk_manager.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
+                position = portfolio_stats['position']
                 
-                if entry_signal is not None:
-                    stop_loss, take_profit = entry_signal
-                    logger.info(f"Entry signal received - Stop Loss: {stop_loss:.4f}, Take Profit: {take_profit:.4f}")
+                if position is None or position['qty'] == 0:
+                    if not signal_queue.is_empty():
+                        signal = signal_queue.pop()
+                        if signal is not None:
+                            direction = risk_manager.accept_signal(signal, symbol)
+                            logger.info(f"Signal {signal} accepted with direction: {direction}")
+                            if direction:
+                                entry_signal = risk_manager.entry_position(symbol, direction)
+                                if entry_signal is not None:
+                                    stop_loss, take_profit = entry_signal
+                                    logger.info(f"Entry signal received - Stop Loss: {stop_loss:.4f}, Take Profit: {take_profit:.4f}")
+                                else:
+                                    logger.warning(f"Entry position returned None for direction {direction}")
+                            else:
+                                logger.info("No valid signal direction received")
                 else:
-                    logger.info("No entry signal generated")
-
-                risk_manager.manage_position(
-                    current_price=current_price,
-                    current_prices=current_prices
-                )
+                    logger.info(f"Position already exists for {symbol}, managing position")
+                    risk_manager.manage_position(symbol, atr_multiplier=1.0)
             else:
-                logger.info("Waiting for candlestick data...")
+                logger.info("Waiting for market data..")
                 time.sleep(5)    
                     
         except Exception as e:
@@ -217,5 +227,5 @@ if __name__ == "__main__":
     threading.Thread(target=start_subscriber, daemon=True).start()
     threading.Thread(target=signal_consumer_loop, daemon=True).start()
     threading.Thread(target=order_consumer_loop, daemon=True).start()
-    threading.Thread(target=lambda: asyncio.run(run_trade_analysis()), daemon=True).start()
+    # threading.Thread(target=lambda: asyncio.run(run_trade_analysis()), daemon=True).start()
     main()

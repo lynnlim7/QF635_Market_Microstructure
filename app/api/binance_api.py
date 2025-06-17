@@ -32,13 +32,13 @@ class BinanceApi:
     """
     Place market order for futures trading
     """
-    def place_market_order(self, quantity) -> bool:
+    def place_market_order(self, symbol: str, side: str, type: str, qty: float) -> bool:
         try:
             self.check_client_exist()
-            order_response = self._client.futures_create_order(symbol=self._symbol.upper(),
-                                              side=Client.SIDE_BUY,
-                                              type=Client.ORDER_TYPE_MARKET,
-                                              quantity=quantity)
+            order_response = self._client.futures_create_order(symbol=symbol.upper(),
+                                          side=side,
+                                          type=type,
+                                          quantity=qty)
             api_logger.info(f"Order submitted: {order_response}")
             return order_response
         except Exception as e:
@@ -170,6 +170,7 @@ class BinanceApi:
     def get_close_prices_df(self, symbol="BTCUSDT", interval=Client.KLINE_INTERVAL_1MINUTE, limit=200):
         df = self.get_ohlcv(symbol, interval, limit)
         return df[['timestamp', 'close']]
+    
 
             
             

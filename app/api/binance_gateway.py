@@ -189,16 +189,20 @@ class BinanceGateway:
         kline_logger.info("Subscribing to kline stream")
         # ws url: 'wss://fstream.binance.com/'
         kline_socket = self.binance_socket_manager.kline_futures_socket(symbol=self._symbol, interval=Client.KLINE_INTERVAL_1MINUTE)
+        kline_logger.info(f"Created kline socket for {self._symbol}")
 
         # async manager to make sure ws is connected and opened
         async with kline_socket as stream:
+            kline_logger.info("Kline socket connection established")
             while True:
                 try:
                     message = await stream.recv()
+                    kline_logger.info(f"Raw kline message received: {message}")
                     k = message['k']
+                    kline_logger.info(f"Processing kline data: {k}")
 
                     candles_dict = {
-                        "symbol": message['ps'],
+                        "symbol": message['ps'], 
                         "interval": k['i'],
                         "open": float(k['o']),
                         "close": float(k['c']),
@@ -211,8 +215,9 @@ class BinanceGateway:
                         "source": "candlestick"
                     }
                     candlestick_channel = get_candlestick_channel(self._symbol)
+                    kline_logger.info(f"Publishing to channel {candlestick_channel}: {candles_dict}")
                     self.publisher.publish(candlestick_channel, candles_dict)
-                    kline_logger.info(f"{candles_dict['symbol']} | open: {float(k['o'])}, close: {float(k['c'])}, volume: {float(k['v'])}, is_closed: {k['x']}")
+                    kline_logger.info(f"Successfully published to {candlestick_channel}")
 
                     if self._kline_callbacks:
                         for _callback in self._kline_callbacks:
