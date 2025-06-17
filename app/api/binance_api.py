@@ -10,6 +10,7 @@ from binance import Client
 from app.common.interface_order import Side
 from app.utils.config import settings
 from app.utils.logger import setup_logger
+from app.utils.logger import main_logger as logger
 
 api_logger = setup_logger(
             logger_name="api",
@@ -32,17 +33,23 @@ class BinanceApi:
     """
     Place market order for futures trading
     """
-    def place_market_order(self, symbol: str, side: str, type: str, qty: float) -> bool:
+    def place_market_order(self, symbol: str, side: str, qty: float) -> bool:
         try:
+            new_qty = round(qty, 3)
+            # new_price = round(, 6)
+            logger.info(f"Trying to place market order in api: {symbol} , side: {side}, qty: {new_qty}")
             self.check_client_exist()
+
+            # ROUND TO 8 Decimal places:
+
             order_response = self._client.futures_create_order(symbol=symbol.upper(),
+                                            type=Client.ORDER_TYPE_MARKET,
                                           side=side,
-                                          type=type,
-                                          quantity=qty)
-            api_logger.info(f"Order submitted: {order_response}")
+                                          quantity=new_qty)
+            logger.info(f"Order submitted: {order_response}")
             return order_response
         except Exception as e:
-            api_logger.error("Failed to place order: {}".format(e))
+            logger.error("Failed to place order: {}".format(e))
             return False
             
     """
@@ -122,6 +129,7 @@ class BinanceApi:
 
     def check_client_exist(self):
         if self._client is None:
+            logger.info("Trying to instantiate client now")
             self._client = Client(self._api_key, self._api_secret, testnet=True)
 
     """

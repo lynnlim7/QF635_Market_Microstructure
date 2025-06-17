@@ -17,6 +17,7 @@ from app.services.circuit_breaker import RedisCircuitBreaker
 from app.strategy.base_strategy import BaseStrategy
 from app.strategy.macd_strategy import MACDStrategy
 from app.queue_manager.locking_queue import LockingQueue
+from app.strategy.random_strategy import RandomStrategy
 from app.utils.config import settings
 from app.utils.func import get_execution_channel, get_orderbook_channel, get_candlestick_channel
 from app.utils.logger import main_logger as logger
@@ -126,7 +127,8 @@ def signal_consumer_loop():
         if not signal_queue.is_empty():
             signal = signal_queue.pop()
             if signal is not None:
-                risk_manager.accept_signal(signal, symbol)
+                # signal is actually a pair value
+                risk_manager.accept_signal(signal[1], symbol)
         time.sleep(1)
 
 def order_consumer_loop():
@@ -143,70 +145,78 @@ def main():
     ## initialize modules
     circuit_breaker = redis_pool.create_circuit_breaker()
     global strategy_instance
-    strategy_instance = MACDStrategy(symbol)
+
+    strategy_instance = RandomStrategy(symbol)
+    # strategy_instance = MACDStrategy(symbol)
     strategy_instance.register_callback(signal_callback)
     logger.info("Strategy instance created and callback registered")
 
+
     while True:
-        try: 
-            if not circuit_breaker.allow_request():
-                logger.warning(f"Circuit breaker is open. Stop trading.")
-                time.sleep(5)
-                continue
+        time.sleep(60)
 
-            current_prices = {}
-            
-            orderbook_data = risk_manager.df_orderbook.get(symbol)
-            price_data = risk_manager.df_candlestick.get(symbol)
-
-            if orderbook_data is not None and len(orderbook_data) > 0:
-                current_price = orderbook_data['mid_price'].iloc[-1]
-                current_prices[symbol] = current_price
-                logger.info(f"Current mid price for {symbol}: {current_price:.4f}")
-
-                atr = risk_manager.calculate_atr()
-                position_size = risk_manager.calculate_position_size()
-
-                if atr is not None:
-                    logger.info(f"Average True Range: {atr:.4f}")
-                if position_size is not None:
-                    logger.info(f"Position Size: {position_size:.4f}")
-
-                drawdown_limit_check = risk_manager.calculate_drawdown_limits(symbol, current_prices)
-                if drawdown_limit_check == False:
-                    logger.warning("Drawdown limits breached. Opening circuit breaker.")
-                    circuit_breaker.force_open("Drawdown limits breached.")
-                    continue
-
-                portfolio_stats = risk_manager.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-                position = portfolio_stats['position']
-                
-                if position is None or position['qty'] == 0:
-                    if not signal_queue.is_empty():
-                        signal = signal_queue.pop()
-                        if signal is not None:
-                            direction = risk_manager.accept_signal(signal, symbol)
-                            logger.info(f"Signal {signal} accepted with direction: {direction}")
-                            if direction:
-                                entry_signal = risk_manager.entry_position(symbol, direction)
-                                if entry_signal is not None:
-                                    stop_loss, take_profit = entry_signal
-                                    logger.info(f"Entry signal received - Stop Loss: {stop_loss:.4f}, Take Profit: {take_profit:.4f}")
-                                else:
-                                    logger.warning(f"Entry position returned None for direction {direction}")
-                            else:
-                                logger.info("No valid signal direction received")
-                else:
-                    logger.info(f"Position already exists for {symbol}, managing position")
-                    risk_manager.manage_position(symbol, atr_multiplier=1.0)
-            else:
-                logger.info("Waiting for market data..")
-                time.sleep(5)    
-                    
-        except Exception as e:
-            logger.error(f"Error in main workflow: {e}", exc_info=True)
-            time.sleep(5)  # Add delay after error to prevent rapid retries
-
+    # currently no need to run this:
+    # # TODO: figure out how to integrate circuit_breaker
+    # while True:
+    #     try:
+    #         if not circuit_breaker.allow_request():
+    #             logger.warning(f"Circuit breaker is open. Stop trading.")
+    #             time.sleep(5)
+    #             continue
+    #
+    #         current_prices = {}
+    #
+    #         orderbook_data = risk_manager.df_orderbook.get(symbol)
+    #         price_data = risk_manager.df_candlestick.get(symbol)
+    #
+    #         if orderbook_data is not None and len(orderbook_data) > 0:
+    #             current_price = orderbook_data['mid_price'].iloc[-1]
+    #             current_prices[symbol] = current_price
+    #             logger.info(f"Current mid price for {symbol}: {current_price:.4f}")
+    #
+    #             atr = risk_manager.calculate_atr()
+    #             position_size = risk_manager.calculate_position_size()
+    #
+    #             if atr is not None:
+    #                 logger.info(f"Average True Range: {atr:.4f}")
+    #             if position_size is not None:
+    #                 logger.info(f"Position Size: {position_size:.4f}")
+    #
+    #             drawdown_limit_check = risk_manager.calculate_drawdown_limits(symbol, current_prices)
+    #             if drawdown_limit_check == False:
+    #                 logger.warning("Drawdown limits breached. Opening circuit breaker.")
+    #                 circuit_breaker.force_open("Drawdown limits breached.")
+    #                 continue
+    #
+    #             portfolio_stats = risk_manager.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
+    #             position = portfolio_stats['position']
+    #
+    #             if position is None or position['qty'] == 0:
+    #                 if not signal_queue.is_empty():
+    #                     signal = signal_queue.pop()
+    #                     if signal is not None:
+    #                         direction = risk_manager.accept_signal(signal, symbol)
+    #                         logger.info(f"Signal {signal} accepted with direction: {direction}")
+    #                         if direction:
+    #                             entry_signal = risk_manager.entry_position(symbol, direction)
+    #                             if entry_signal is not None:
+    #                                 stop_loss, take_profit = entry_signal
+    #                                 logger.info(f"Entry signal received - Stop Loss: {stop_loss:.4f}, Take Profit: {take_profit:.4f}")
+    #                             else:
+    #                                 logger.warning(f"Entry position returned None for direction {direction}")
+    #                         else:
+    #                             logger.info("No valid signal direction received")
+    #             else:
+    #                 logger.info(f"Position already exists for {symbol}, managing position")
+    #                 # risk_manager.manage_position(symbol, atr_multiplier=1.0)
+    #         else:
+    #             logger.info("Waiting for market data..")
+    #             time.sleep(5)
+    #
+    #     except Exception as e:
+    #         logger.error(f"Error in main workflow: {e}", exc_info=True)
+    #         time.sleep(5)  # Add delay after error to prevent rapid retries
+    #
         # strategy.update_data(last_candle=price_data)
         # signal = strategy.generate_signal(price_data)
 

@@ -37,6 +37,8 @@ class RiskManager:
         self.df_orderbook = {}  
         self.df_candlestick = {}  
         self.current_value = 0.0
+        self.current_position_size = None
+        self.current_atr = -1
 
     def process_orderbook(self, data=dict):
         logger.info("Initializing orderbook data.")
@@ -66,10 +68,11 @@ class RiskManager:
         else:
             self.df_orderbook[symbol] = pd.concat([self.df_orderbook[symbol], row]).tail(500)
 
+
     def process_candlestick(self, data):
-        logger.info("Initializing candlestick data.")
-        
+
         if isinstance(data, dict):
+            logger.info(f"Initializing candlestick data {data.get('is_closed')}")
             symbol = data.get('symbol', self.symbol)
             df_candlestick = pd.DataFrame([{
                 'timestamp': pd.to_datetime(data['start_time'], unit='ms'),
@@ -84,8 +87,11 @@ class RiskManager:
                 self.df_candlestick[symbol] = df_candlestick
             else:
                 self.df_candlestick[symbol] = pd.concat([self.df_candlestick[symbol], df_candlestick]).tail(500)
-            
-            return self.df_candlestick[symbol]
+
+            # after putting into df:
+            self.calculate_atr()
+            self.calculate_position_size()
+            self.calculate_drawdown_limits(symbol)
     
     # average true range - measure price vol of asset approx 14 days 
     def calculate_atr(self, period=14):
@@ -109,37 +115,38 @@ class RiskManager:
             true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
 
             atr = true_range.rolling(window=period, min_periods=1).mean()
-            return float(atr.iloc[-1]) if not atr.empty else None
+            self.current_atr = float(atr.iloc[-1]) if not atr.empty else None
+
         except Exception as e:
             logger.error(f"Error calculating ATR for {self.symbol}: {e}", exc_info=True)
-            return None
+            self.current_atr = None
 
     # dynamic position size 
     # should be based on current existing positions - net positions? 
     def calculate_position_size(self) -> float:
-        atr = self.calculate_atr()
-        if atr is None or atr <= 0:
+
+        if self.current_atr is None or self.current_atr <= 0:
             logger.warning("Unable to calculate ATR. Skipping position sizing and trade.")
-            return None
-        
+            return
+
         if self.symbol not in self.df_orderbook or self.df_orderbook[self.symbol].empty:
             logger.warning(f"No orderbook data available for {self.symbol}")
-            return None
-            
+            return
+
         try:
             entry_price = self.df_orderbook[self.symbol]['mid_price'].iloc[-1]
             if entry_price <= 0:
                 logger.warning(f"Invalid entry price: {entry_price}")
-                return None
-                
+
             risk_amount = entry_price * self.max_risk_per_trade_pct
-            position_size = risk_amount / atr
-            logger.info(f"Calculated position size: {position_size:.4f} with entry price: {entry_price:.4f} and ATR: {atr:.4f}")
-            return position_size
+            position_size = risk_amount / self.current_atr
+            logger.info(f"Calculated position size: {position_size:.4f} with entry price: {entry_price:.4f} and ATR: {self.current_atr:.4f}")
+            # TODO: CHECK WHY SO BIG?
+            self.current_position_size = position_size / 1000
         except Exception as e:
             logger.error(f"Error calculating position size: {e}", exc_info=True)
-            return None
-    
+            self.current_position_size = None
+
     def trade_directions(self, signal:int) -> str:
         if signal == settings.SIGNAL_SCORE_BUY:
             return "BUY"
@@ -147,18 +154,19 @@ class RiskManager:
             return "SELL"
         return "HOLD"
     
-    def accept_signal(self, signal: int, symbol: str) -> str:
+    def accept_signal(self, signal: int, symbol: str) :
         if signal is None:
             logger.info("No signal received from queue.")
-            return None
-            
+            return
+
+        logger.info(f"Receiving signal from queue: {signal}")
         direction = self.trade_directions(signal)
         portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
         position = portfolio_stats['position']
         
         if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
             logger.warning(f"No orderbook data available for {symbol}")
-            return None
+            return
             
         current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
         
@@ -173,19 +181,17 @@ class RiskManager:
 
         if not direction or direction == "HOLD":
             logger.info("No valid trade signal received. Holding position.")
-            return None
-        
+
         if direction == "BUY":
             if current_exposure >= max_exposure:
                 logger.info(f"Max exposure reached for {symbol} ({current_exposure}/{max_exposure}), ignoring signal.")
-                return None
             else:
                 logger.info(f"Accepting BUY signal for {symbol}. Current exposure: {current_exposure}/{max_exposure}")
-                return direction
+                self.entry_position(symbol, direction)
         elif direction == "SELL":
             # no need to check exposure for sell signal
             logger.info(f"Accepted SELL signal for {symbol}. Current exposure: {current_exposure}/{max_exposure}")
-            return direction
+            self.entry_position(symbol, direction)
 
     def entry_position(self, symbol: str, direction: str = None):
         if direction is None:
@@ -196,8 +202,7 @@ class RiskManager:
         # if no existing position, calculate position size
         if portfolio_stats['position'] is None or portfolio_stats['position']['qty'] == 0:
             logger.info(f"No open position for {symbol}, calculating position size.")
-            position_size = self.calculate_position_size()
-            if not position_size:
+            if not self.current_position_size:
                 logger.warning(f"Could not calculate position size for {symbol}. Skipping trade.")
                 return None
             
@@ -206,30 +211,29 @@ class RiskManager:
                 if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
                     logger.warning(f"No orderbook data available for {symbol}")
                     return None
-                    
+
                 entry_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
                 
-                logger.info(f"Placing {direction} order for {symbol} with quantity: {position_size}")
+                logger.info(f"Placing {direction} order for {symbol} with quantity: {self.current_position_size}")
                 
                 self.api.place_market_order(
                     symbol=symbol,
                     side=direction,
-                    type="MARKET",
-                    qty=position_size,
+                    qty=self.current_position_size,
                 )
-                logger.info(f"Placed market order for {symbol} with quantity: {position_size}")
+                logger.info(f"Placed market order for {symbol} with quantity: {self.current_position_size}")
 
                 self.active_trades[symbol] = {
                     "entry_price": entry_price,
-                    "quantity": position_size,
+                    "quantity": self.current_position_size,
                     "trade_direction": direction
                 }
                 
                 # stop loss and take profit levels
-                atr = self.calculate_atr()
-                if atr is not None:
-                    stop_loss = entry_price - (atr * 1.5)  
-                    take_profit = entry_price + (atr * 2.0)  
+                # todo: not used here, need to groom
+                if self.current_atr is not None:
+                    stop_loss = entry_price - (self.current_atr * 1.5)
+                    take_profit = entry_price + (self.current_atr * 2.0)
                     return stop_loss, take_profit
                 
             except Exception as e:
@@ -250,7 +254,7 @@ class RiskManager:
             direction = "LONG" if qty > 0 else "SHORT"
             unrealized_pnl = portfolio_stats['unrealized_pnl'] or 0.0
 
-            atr = self.calculate_atr()
+            atr = self.current_atr
             if atr is None:
                 logger.warning(f"Could not calculate ATR for {symbol}. Skipping position management.")
                 return
@@ -336,7 +340,8 @@ class RiskManager:
                     # cancel existing orders
                     self.api.cancel_open_orders(symbol=symbol)
                     logger.info(f"Cancelled existing orders for {symbol}.")
-                    
+
+                    # TODO: these apis dont have some of the arguments, check again
                     # place new stop loss and take profit orders
                     logger.info(f"Placing stop loss order for {symbol} at price: {new_sl}")
                     self.api.place_stop_loss(
@@ -349,7 +354,7 @@ class RiskManager:
                     )
                     
                     logger.info(f"Placing take profit order for {symbol} at price: {new_tp}")
-                    self.api.place_take_profit_order(
+                    self.api.place_take_profit(
                         side="SELL" if direction == "LONG" else "BUY",
                         type="TAKE_PROFIT",
                         qty=qty,
@@ -365,7 +370,8 @@ class RiskManager:
 
             
     ## total portfolio risk
-    def calculate_drawdown_limits(self, symbol, current_prices) -> bool:
+    # here liquidates the position -> need to trigger position
+    def calculate_drawdown_limits(self, symbol) -> bool:
         portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
         portfolio_value = portfolio_stats['total_pnl'] if portfolio_stats else 0.0
         
@@ -401,7 +407,6 @@ class RiskManager:
                         # liquidate position
                         self.api.place_market_order(
                             side="SELL",
-                            type="MARKET",
                             qty=qty,
                             symbol=symbol
                         )
