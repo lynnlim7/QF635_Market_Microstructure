@@ -9,7 +9,7 @@ from binance import Client
 
 from app.common.interface_order import Side
 from app.utils.config import settings
-from app.utils.logger import setup_logger
+from app.utils.logger import setup_logger, main_logger as logger
 
 api_logger = setup_logger(
             logger_name="api",
@@ -32,7 +32,7 @@ class BinanceApi:
     """
     Place a limit order for FUTURES trading
     """
-    def place_limit_order(self, side: Side, price, quantity, tif='IOC') -> bool:
+    def place_limit_order(self, side: Side, price, quantity, tif='IOC'):
         try:
             self.check_client_exist()
             order_response = self._client.futures_create_order(symbol=self._symbol.upper(),
@@ -41,11 +41,15 @@ class BinanceApi:
                                               price=price,
                                               quantity=quantity,
                                               timeInForce=tif)
-            api_logger.info(f"Order submitted: {order_response}")
+            logger.info(f"Order submitted: {order_response}")
             return order_response
         except Exception as e:
-            api_logger.error("Failed to place order: {}".format(e))
-            return False
+            logger.error("Failed to place order: {}".format(e))
+            res = {
+                "status": "FAILED",
+                "errorMsg": str(e),
+            }
+            return res
 
     """
     order_id: its the client_order_id from the order creation: x-Cb7ytekJff39894ef6683781a05ad8
