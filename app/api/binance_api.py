@@ -59,7 +59,7 @@ class BinanceApi:
             self.check_client_exist()
             order_response = self._client.futures_create_order(symbol=self._symbol.upper(),
                                               side=side.name,
-                                              type=Client.ORDER_TYPE_LIMIT,
+                                              type=Client.FUTURE_ORDER_TYPE_LIMIT,
                                               price=price,
                                               quantity=quantity,
                                               timeInForce=tif)

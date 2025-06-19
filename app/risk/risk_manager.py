@@ -40,6 +40,7 @@ class RiskManager:
         self.current_value = 0.0
         self.current_position_size = None
 
+
     def on_new_orderbook(self, data:dict):
         if not isinstance(data, dict):
             logger.warning(f"Invalid data format for orderbook: {data}")
@@ -74,7 +75,6 @@ class RiskManager:
             self.df_orderbook[symbol] = pd.concat([self.df_orderbook[symbol], row]).tail(500)
 
         self.calculate_position_size()
-        self.on_signal_update(signal=settings.SIGNAL_SCORE_BUY, symbol=symbol)
         # self.manage_position(symbol)
            
     def on_new_candlestick(self, data):
@@ -127,6 +127,10 @@ class RiskManager:
             atr = true_range.rolling(window=period, min_periods=1).mean()
             self.current_atr = float(atr.iloc[-1]) if not atr.empty else None
 
+            if self.current_atr is not None and self.current_atr > 0:
+                if self.symbol in self.df_orderbook and not self.df_orderbook[self.symbol].empty:
+                    self.calculate_position_size()
+
         except Exception as e:
             logger.error(f"Error calculating ATR for {self.symbol}: {e}", exc_info=True)
             self.current_atr = None
@@ -172,33 +176,42 @@ class RiskManager:
         logger.info(f"Received signal from queue: {signal}")
     
     def on_signal_update(self, signal:int, symbol:str):
+        logger.info(f"=====SIGNAL UPDATE=====: {signal} for {symbol}")
+
         self.accept_signal(signal, symbol)
         direction = self.trade_directions(signal)
 
-        # # ignore signal if its hold
-        # if direction == "HOLD":
-        #     logger.info("No valid trade signal received. Holding position.")
-        #     return
+        # portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
 
-        direction = self.trade_directions(signal)
-        portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
+        # workaround using api 
+        portfolio_stats = self.api.get_current_position()
         print(f"portfolio_stats:{portfolio_stats}!!!!!!!!!!!!!!!!!!!!")
-        position = portfolio_stats.get('position')
-        unrealized_pnl = portfolio_stats.get('unrealized_pnl', 0.0)
+        
+        position_amounts = [float(p.get('positionAmt', 0.0)) for p in portfolio_stats if p.get('positionAmt')]
+        unrealized_pnls = [float(p.get('unRealizedProfit', 0.0)) for p in portfolio_stats if p.get('positionAmt')]
+
+        position_amt = position_amounts[0] if position_amounts else 0.0
+        unrealized_pnl = unrealized_pnls[0] if unrealized_pnls else 0.0
+    
+        # position = portfolio_stats.get('position')
+        # unrealized_pnl = portfolio_stats.get('unrealized_pnl', 0.0)
 
         current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
 
         if direction == "BUY":
+            logger.info(f"Processing BUY signal for {symbol} with current price: {current_price:.4f}")
             # if position exists, check if we can buy more
-            if position and position.get('qty') != 0:
+            # if position and position.get('qty') != 0:
+            if len(position_amounts)>0:
                 futures_balance = self.api.get_account_balance()
                 balance = 0.0
                 for asset in futures_balance:
-                    if asset.get('asset') == symbol:
+                    if asset.get('asset') == 'USDT':
                         balance = float(asset.get('balance', 0.0))
                         break
                 total_portfolio_value = balance + unrealized_pnl
-                current_exposure = abs(position['qty'] * current_price)
+                # current_exposure = abs(position['qty'] * current_price)
+                current_exposure = abs(position_amounts[0]['positionAmt'] * current_price)
                 max_exposure = total_portfolio_value * self.max_exposure_pct
                 logger.info(f"Total portfolio value: {total_portfolio_value}, Current exposure: {current_exposure}, Max exposure: {max_exposure}")
                 # if current exposure exceeds threshold, we cannot buy more 
@@ -213,7 +226,8 @@ class RiskManager:
                 self.entry_position(symbol, direction)
         elif direction == "SELL":
             # if no position exists, we cannot sell 
-            if not position or position.get('qty') == 0:
+            # if not position or position.get('qty') == 0:
+            if not position_amounts or position_amt == 0.0:
                 logger.info(f"No open position for {symbol}, cannot accept SELL signal.")
             else:
                 logger.info(f"Accepted SELL signal for {symbol}.")
@@ -222,63 +236,9 @@ class RiskManager:
             # if direction is HOLD or invalid
             logger.info(f"Invalid signal direction: {direction} for {symbol}. Holding position.")
             return
-        
-
-
-        
-
-
-
-
-
-    # def accept_signal(self, signal: int, symbol: str) :
-    #     if signal is None:
-    #         logger.info("No signal received from queue.")
-    #         return
-    #     logger.info(f"Receiving signal from queue: {signal}")
-
-    #     direction = self.trade_directions(signal)
-    #     if not direction or direction == "HOLD":
-    #         logger.info("No valid trade signal received. Holding position.")
-    #         return
-        
-    #     direction = self.trade_directions(signal)
-    #     portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-    #     position = portfolio_stats.get('position')
-        
-    #     if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
-    #         logger.warning(f"No orderbook data available for {symbol}")
-    #         return
-            
-    #     current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
-        
-    #     # total portfolio value
-    #     total_pnl = portfolio_stats.get('total_pnl', 0)  
-    #     total_commissions = portfolio_stats.get('total_commissions', 0)
-
-    #     current_exposure = abs(position['qty'] * current_price) if position and position.get('qty') != 0 else 0
-    #     max_exposure = (total_pnl - total_commissions) * self.max_exposure_pct
-        
-    #     logger.info(f"Total PnL: {total_pnl}, Commissions: {total_commissions}, Current exposure: {current_exposure}, Max exposure: {max_exposure}")
-
-        # if direction == "BUY":
-        #     logger.info(f"Accepting BUY signal for {symbol}. Current exposure: {current_exposure}/{max_exposure}")
-        #     if position and position.get('qty') != 0 and current_exposure >= max_exposure:
-        #         logger.info(f"Max exposure reached for {symbol} ({current_exposure}/{max_exposure}), ignoring signal.")
-        #     else:
-        #         logger.info(f"Accepting BUY signal for {symbol}. Current exposure: {current_exposure}/{max_exposure}")
-        #         self.entry_position(symbol, direction)
-        # elif direction == "SELL":
-        #     if not position or position.get('qty') == 0:
-        #         logger.info(f"No open position for {symbol}, cannot accept SELL signal.")
-        #         return
-        #     else:
-        #         # no need to check exposure for sell signal
-        #         logger.info(f"Accepted SELL signal for {symbol}. Current exposure: {current_exposure}/{max_exposure}")
-        #         self.entry_position(symbol, direction)
 
     def entry_position(self, symbol: str, direction: str = None):
-        entry_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
+        # entry_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
         try:
             self.api.place_market_order(
             symbol=symbol,
@@ -290,50 +250,7 @@ class RiskManager:
             logger.error(f"Failed to place market order for {symbol}: {e}")
             return None
 
-        # if direction is None:
-        #     logger.info("No direction provided for order entry.")
-        #     return None
-            
-        # portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-        # # if no existing position, calculate position size
-        # if portfolio_stats['position'] is None or portfolio_stats['position']['qty'] == 0:
-        #     logger.info(f"No open position for {symbol}, calculating position size.")
-        #     if not self.current_position_size:
-        #         logger.warning(f"Could not calculate position size for {symbol}. Skipping trade.")
-        #         return None
-            
-        #     try:
-        #         # default to market order
-        #         if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
-        #             logger.warning(f"No orderbook data available for {symbol}")
-        #             return None
-
-        #         entry_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
-                
-        # #         logger.info(f"Placing {direction} order for {symbol} with quantity: {self.current_position_size}")
-                
-        #         try:
-        #             self.api.place_market_order(
-        #                 symbol=symbol,
-        #                 side=direction,
-        #                 qty=self.current_position_size,
-        #             )
-        #             logger.info(f"Placed market order for {symbol} with quantity: {self.current_position_size:.3f}")
-
-        #             self.active_trades[symbol] = {
-        #                 "entry_price": entry_price,
-        #                 "quantity": self.current_position_size,
-        #                 "trade_direction": direction
-        #             }
-        #         except Exception as e:
-        #             logger.error(f"Failed to place order: {e}")
-        #             if "Margin is insufficient" in str(e):
-        #                 logger.warning("Insufficient margin. Please check your account balance and leverage settings.")
-        #             return None
-                
-        #     except Exception as e:
-        #         logger.error(f"Failed to place market order for {symbol}: {e}")
-        #         return None
+ 
 
     # def manage_position(self, symbol: str, atr_multiplier=1.0):
     #     portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)

@@ -128,7 +128,7 @@ def signal_consumer_loop():
             signal = signal_queue.pop()
             if signal is not None:
                 # signal is actually a pair value
-                risk_manager.accept_signal(signal[1], symbol)
+                risk_manager.on_signal_update(signal[1], symbol)
         time.sleep(1)
 
 def order_consumer_loop():
