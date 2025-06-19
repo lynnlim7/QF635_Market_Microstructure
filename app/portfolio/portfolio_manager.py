@@ -129,7 +129,7 @@ class PortfolioManager:
             return
 
         if current_positions['qty'] == 0:
-            self.unrealized_pnl = 0
+            self.unrealized_pnl[symbol] = 0
             return
 
         if current_positions['qty'] > 0:

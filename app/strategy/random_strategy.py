@@ -57,11 +57,15 @@ class RandomStrategy(BaseStrategy):
         Update the strategy with the latest data.
         This function appends the latest close price and recalculates the MACD and Signal Line.
         """
-        # if not last_candle['is_closed']:
+        if not isinstance(last_candle, dict):
+            logger.warning(f"Invalid data format received: {last_candle}")
+            return
+
+        # if not last_candle.get('is_closed', True):
         #     return
 
         signal = self.generate_signal()
-        print(f"Signal Generated: {signal}")
+        logger.info(f"Signal Generated: {signal}")
         for callback in self._callbacks:
             callback(signal)
 

@@ -43,9 +43,9 @@ class BinanceApi:
             # ROUND TO 8 Decimal places:
 
             order_response = self._client.futures_create_order(symbol=symbol.upper(),
-                                            type=Client.ORDER_TYPE_MARKET,
-                                          side=side,
-                                          quantity=new_qty)
+                                        type=Client.FUTURE_ORDER_TYPE_MARKET,
+                                        side=side,
+                                        quantity=new_qty)
             logger.info(f"Order submitted: {order_response}")
             return order_response
         except Exception as e:
@@ -70,23 +70,24 @@ class BinanceApi:
             api_logger.error("Failed to place order: {}".format(e))
             return False
         
-    def get_open_orders(self):
+    def get_open_orders(self, symbol: str = None) -> list:
         try: 
             self.check_client_exist()
-            open_orders = self._client.futures_get_open_orders(symbol=self._symbol.upper())
+            open_orders = self._client.futures_get_open_orders(symbol=symbol.upper())
             return open_orders
         except Exception as e:
             api_logger.warning("Failed to retrieve open orders: {}".format(e))
             return []
 
-    def place_stop_loss(self, quantity: float, price: float, is_long: bool = True) -> bool:
+    def place_stop_loss(self, quantity: float, price: float) -> bool:
         try: 
             self.check_client_exist()
             order_response = self._client.futures_create_order(
                                               symbol=self._symbol.upper(),
-                                              side=Client.SIDE_SELL if is_long else Client.SIDE_BUY,
-                                              type=Client.ORDER_TYPE_STOP_LOSS,
-                                              price=price,
+                                              side=Client.SIDE_SELL,
+                                              type=Client.FUTURE_ORDER_TYPE_STOP_MARKET,
+                                              stopPrice=price,
+                                              closePosition=True,
                                               quantity=quantity,
                                               timeInForce='GTC')
             return order_response
@@ -94,14 +95,15 @@ class BinanceApi:
             api_logger.warning("Failed to create stop loss order: {}".format(e))
             return False
         
-    def place_take_profit(self, quantity: float, price: float, is_long: bool) -> bool:
+    def place_take_profit(self, quantity: float, price: float) -> bool:
         try:
             self.check_client_exist()
             order_response = self._client.futures_create_order(
                                               symbol=self._symbol.upper(),
-                                              side=Client.SIDE_SELL if is_long else Client.SIDE_BUY,
-                                              type=Client.ORDER_TYPE_TAKE_PROFIT,
-                                              price=price,
+                                              side=Client.SIDE_SELL,
+                                              type=Client.FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
+                                              stopPrice=price,
+                                              closePosition=True,
                                               quantity=quantity,
                                               timeInForce='GTC')
             return order_response
@@ -109,19 +111,21 @@ class BinanceApi:
             api_logger.warning("Failed to create take profit order: {}".format(e))
             return False
             
-    def cancel_order(self, order_id) -> bool:
+    def cancel_order(self, symbol:str, order_id: int) -> bool:
         try:
             self.check_client_exist()
-            order_response = self._client.futures_cancel_order(symbol=self._symbol.upper(), origClientOrderId=order_id)
+            order_response = self._client.futures_cancel_order(
+                                            symbol=symbol.upper(),
+                                            orderId=order_id)
             return order_response
         except Exception as e:
-            api_logger.warning("Failed to cancel order: {}, {}".format(order_id, e))
+            api_logger.warning("Failed to cancel order: {}, {}".format(e))
             return False
         
-    def cancel_open_orders(self):
+    def cancel_open_orders(self, symbol: str) -> bool:
         try:
             self.check_client_exist()
-            order_response = self._client.futures_cancel_all_open_orders(symbol=self._symbol.upper())
+            order_response = self._client.futures_cancel_all_open_orders(symbol=symbol.upper())
             return order_response
         except Exception as e:
             api_logger.warning("Failed to cancel all open orders: {}".format(e))
@@ -131,6 +135,15 @@ class BinanceApi:
         if self._client is None:
             logger.info("Trying to instantiate client now")
             self._client = Client(self._api_key, self._api_secret, testnet=True)
+
+    def get_account_balance(self) -> dict:
+        try:
+            self.check_client_exist()
+            return self._client.futures_account_balance()
+        except Exception as e:
+            error_msg = f"Failed to retrieve account balance: {e}"
+            api_logger.warning(error_msg)
+            return {"errorMsg": error_msg}
 
     """
     Get current open positions.

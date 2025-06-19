@@ -38,7 +38,6 @@ strategy_instance: BaseStrategy | None = None
 binance_api = BinanceApi(settings.SYMBOL)
 
 redis_pool = RedisPool()
-# redis_pool.create_circuit_breaker()
 
 circuit_breaker = redis_pool.create_circuit_breaker()
 publisher = redis_pool.create_publisher()
@@ -70,8 +69,9 @@ def start_binance() -> None:
     gateway_instance.connection()
 
 def handle_order_book_quote(data: dict):
-    # logger.info(f"Receiving order book quote from redis!!: {data}")
-    return
+    logger.info(f"Receiving order book quote from redis!!: {data}")
+    portfolio_manager.on_new_price(data)
+    risk_manager.on_new_orderbook(data)
 
 def handle_execution_updates(data: dict):
     order_queue.push(data)
@@ -95,7 +95,7 @@ def start_subscriber():
         logger.info(f"Registering handlers for channel: {channel}")
         if "candlestick" in channel:
             subscriber.register_handler(channel, strategy_instance.update_data)
-            subscriber.register_handler(channel, risk_manager.process_candlestick)
+            subscriber.register_handler(channel, risk_manager.on_new_candlestick)
             logger.info(f"Registered candlestick handlers for {channel}")
 
         if "execution" in channel:
@@ -106,7 +106,7 @@ def start_subscriber():
         if "orderbook" in channel:
             subscriber.register_handler(channel, handle_order_book_quote)
             subscriber.register_handler(channel, portfolio_manager.on_new_price)
-            subscriber.register_handler(channel, risk_manager.process_orderbook)
+            subscriber.register_handler(channel, risk_manager.on_new_orderbook)
             logger.info(f"Registered orderbook handlers for {channel}")
     
     logger.info("Starting Redis subscriber...")

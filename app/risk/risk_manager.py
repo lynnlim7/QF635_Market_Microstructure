@@ -22,7 +22,7 @@ class RiskManager:
                  max_risk_per_trade_pct:float = settings.MAX_RISK_PER_TRADE_PCT, 
                  max_absolute_drawdown:float = settings.MAX_ABSOLUTE_DRAWDOWN,
                  max_relative_drawdown:float = settings.MAX_RELATIVE_DRAWDOWN, 
-                 max_exposure_pct:float = settings.MAX_EXPOSURE_PCT
+                 max_exposure_pct:float = settings.MAX_EXPOSURE_PCT,
                  ):
         self.api = api
         self.symbol = symbol
@@ -33,26 +33,31 @@ class RiskManager:
         self.max_relative_drawdown = max_relative_drawdown
         self.max_exposure_pct = max_exposure_pct
 
+
         self.active_trades = {}
         self.df_orderbook = {}  
         self.df_candlestick = {}  
         self.current_value = 0.0
         self.current_position_size = None
-        self.current_atr = -1
 
-    def process_orderbook(self, data=dict):
-        logger.info("Initializing orderbook data.")
+    def on_new_orderbook(self, data:dict):
+        if not isinstance(data, dict):
+            logger.warning(f"Invalid data format for orderbook: {data}")
+            return
+            
+        logger.info("Processing orderbook data.")
+
+        timestamp = pd.to_datetime(data.get("timestamp", None), unit='ms')
+        symbol = data.get('contract_name', self.symbol).upper()  
+
         bids = data.get('bids', [])
         asks = data.get('asks', [])
-        timestamp = pd.to_datetime(data.get("timestamp", None), unit='ms')
-        symbol = data.get('symbol', self.symbol)
-
         best_bid = float(bids[0]["price"])
         best_ask = float(asks[0]["price"])
         mid_price = (best_ask + best_bid)/2
         spread = best_ask - best_bid
         spread_pct = spread/mid_price
-
+           
         row = pd.DataFrame([{
             "timestamp": timestamp,
             "symbol": symbol,
@@ -62,25 +67,32 @@ class RiskManager:
             "spread": spread,
             "spread_pct": spread_pct
         }]).set_index("timestamp")
-        
+            
         if symbol not in self.df_orderbook:
             self.df_orderbook[symbol] = row
         else:
             self.df_orderbook[symbol] = pd.concat([self.df_orderbook[symbol], row]).tail(500)
 
-
-    def process_candlestick(self, data):
-
+        self.calculate_position_size()
+        self.on_signal_update(signal=settings.SIGNAL_SCORE_BUY, symbol=symbol)
+        # self.manage_position(symbol)
+           
+    def on_new_candlestick(self, data):
+        # if not data.get('is_closed', False):
+        #     logger.info("Received incomplete candle, skipping processing.")
+        #     return
         if isinstance(data, dict):
-            logger.info(f"Initializing candlestick data {data.get('is_closed')}")
-            symbol = data.get('symbol', self.symbol)
+            symbol = data.get('symbol', self.symbol).upper()
+            timestamp = pd.to_datetime(data['start_time'], unit='ms')
+
             df_candlestick = pd.DataFrame([{
-                'timestamp': pd.to_datetime(data['start_time'], unit='ms'),
+                'timestamp': timestamp,
                 'open': float(data['open']),
                 'high': float(data['high']),
                 'low': float(data['low']),
                 'close': float(data['close']),
-                'volume': float(data['volume'])
+                'volume': float(data['volume']),
+                'is_closed': True # get full candle
             }]).set_index('timestamp')
             
             if symbol not in self.df_candlestick:
@@ -88,10 +100,8 @@ class RiskManager:
             else:
                 self.df_candlestick[symbol] = pd.concat([self.df_candlestick[symbol], df_candlestick]).tail(500)
 
-            # after putting into df:
             self.calculate_atr()
-            self.calculate_position_size()
-            self.calculate_drawdown_limits(symbol)
+            # self.calculate_drawdown_limits(symbol)
     
     # average true range - measure price vol of asset approx 14 days 
     def calculate_atr(self, period=14):
@@ -124,7 +134,6 @@ class RiskManager:
     # dynamic position size 
     # should be based on current existing positions - net positions? 
     def calculate_position_size(self) -> float:
-
         if self.current_atr is None or self.current_atr <= 0:
             logger.warning("Unable to calculate ATR. Skipping position sizing and trade.")
             return
@@ -139,10 +148,12 @@ class RiskManager:
                 logger.warning(f"Invalid entry price: {entry_price}")
 
             risk_amount = entry_price * self.max_risk_per_trade_pct
-            position_size = risk_amount / self.current_atr
+            position_size = (risk_amount / self.current_atr)/1000
             logger.info(f"Calculated position size: {position_size:.4f} with entry price: {entry_price:.4f} and ATR: {self.current_atr:.4f}")
-            # TODO: CHECK WHY SO BIG?
-            self.current_position_size = position_size / 1000
+            # # TODO: CHECK WHY SO BIG?
+            self.current_position_size = position_size
+            return position_size
+            
         except Exception as e:
             logger.error(f"Error calculating position size: {e}", exc_info=True)
             self.current_position_size = None
@@ -158,266 +169,347 @@ class RiskManager:
         if signal is None:
             logger.info("No signal received from queue.")
             return
+        logger.info(f"Received signal from queue: {signal}")
+    
+    def on_signal_update(self, signal:int, symbol:str):
+        self.accept_signal(signal, symbol)
+        direction = self.trade_directions(signal)
 
-        logger.info(f"Receiving signal from queue: {signal}")
+        # # ignore signal if its hold
+        # if direction == "HOLD":
+        #     logger.info("No valid trade signal received. Holding position.")
+        #     return
+
         direction = self.trade_directions(signal)
         portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-        position = portfolio_stats['position']
-        
-        if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
-            logger.warning(f"No orderbook data available for {symbol}")
-            return
-            
+        print(f"portfolio_stats:{portfolio_stats}!!!!!!!!!!!!!!!!!!!!")
+        position = portfolio_stats.get('position')
+        unrealized_pnl = portfolio_stats.get('unrealized_pnl', 0.0)
+
         current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
-        
-        # total portfolio value
-        total_pnl = portfolio_stats['total_pnl']  
-        total_commissions = portfolio_stats['total_commissions']
-
-        current_exposure = abs(position['qty'] * current_price) if position and position['qty'] != 0 else 0
-        max_exposure = (total_pnl - total_commissions) * self.max_exposure_pct
-        
-        logger.info(f"Total PnL: {total_pnl}, Commissions: {total_commissions}, Current exposure: {current_exposure}, Max exposure: {max_exposure}")
-
-        if not direction or direction == "HOLD":
-            logger.info("No valid trade signal received. Holding position.")
 
         if direction == "BUY":
-            if current_exposure >= max_exposure:
-                logger.info(f"Max exposure reached for {symbol} ({current_exposure}/{max_exposure}), ignoring signal.")
-            else:
-                logger.info(f"Accepting BUY signal for {symbol}. Current exposure: {current_exposure}/{max_exposure}")
+            # if position exists, check if we can buy more
+            if position and position.get('qty') != 0:
+                futures_balance = self.api.get_account_balance()
+                balance = 0.0
+                for asset in futures_balance:
+                    if asset.get('asset') == symbol:
+                        balance = float(asset.get('balance', 0.0))
+                        break
+                total_portfolio_value = balance + unrealized_pnl
+                current_exposure = abs(position['qty'] * current_price)
+                max_exposure = total_portfolio_value * self.max_exposure_pct
+                logger.info(f"Total portfolio value: {total_portfolio_value}, Current exposure: {current_exposure}, Max exposure: {max_exposure}")
+                # if current exposure exceeds threshold, we cannot buy more 
+                if current_exposure >= max_exposure:
+                    logger.info(f"Max exposure: {max_exposure} reached for {symbol}, ignoring BUY signal.")
+                else:
+                    logger.info(f"Current exposure within threshold. Accepting BUY signal for {symbol}.")
+                    self.entry_position(symbol, direction)
+            else: 
+                # no position exists, we can buy
+                logger.info(f"No open position for {symbol}, accepting BUY signal.")
                 self.entry_position(symbol, direction)
         elif direction == "SELL":
-            # no need to check exposure for sell signal
-            logger.info(f"Accepted SELL signal for {symbol}. Current exposure: {current_exposure}/{max_exposure}")
-            self.entry_position(symbol, direction)
+            # if no position exists, we cannot sell 
+            if not position or position.get('qty') == 0:
+                logger.info(f"No open position for {symbol}, cannot accept SELL signal.")
+            else:
+                logger.info(f"Accepted SELL signal for {symbol}.")
+                self.entry_position(symbol, direction)
+        else:
+            # if direction is HOLD or invalid
+            logger.info(f"Invalid signal direction: {direction} for {symbol}. Holding position.")
+            return
+        
+
+
+        
+
+
+
+
+
+    # def accept_signal(self, signal: int, symbol: str) :
+    #     if signal is None:
+    #         logger.info("No signal received from queue.")
+    #         return
+    #     logger.info(f"Receiving signal from queue: {signal}")
+
+    #     direction = self.trade_directions(signal)
+    #     if not direction or direction == "HOLD":
+    #         logger.info("No valid trade signal received. Holding position.")
+    #         return
+        
+    #     direction = self.trade_directions(signal)
+    #     portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
+    #     position = portfolio_stats.get('position')
+        
+    #     if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
+    #         logger.warning(f"No orderbook data available for {symbol}")
+    #         return
+            
+    #     current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
+        
+    #     # total portfolio value
+    #     total_pnl = portfolio_stats.get('total_pnl', 0)  
+    #     total_commissions = portfolio_stats.get('total_commissions', 0)
+
+    #     current_exposure = abs(position['qty'] * current_price) if position and position.get('qty') != 0 else 0
+    #     max_exposure = (total_pnl - total_commissions) * self.max_exposure_pct
+        
+    #     logger.info(f"Total PnL: {total_pnl}, Commissions: {total_commissions}, Current exposure: {current_exposure}, Max exposure: {max_exposure}")
+
+        # if direction == "BUY":
+        #     logger.info(f"Accepting BUY signal for {symbol}. Current exposure: {current_exposure}/{max_exposure}")
+        #     if position and position.get('qty') != 0 and current_exposure >= max_exposure:
+        #         logger.info(f"Max exposure reached for {symbol} ({current_exposure}/{max_exposure}), ignoring signal.")
+        #     else:
+        #         logger.info(f"Accepting BUY signal for {symbol}. Current exposure: {current_exposure}/{max_exposure}")
+        #         self.entry_position(symbol, direction)
+        # elif direction == "SELL":
+        #     if not position or position.get('qty') == 0:
+        #         logger.info(f"No open position for {symbol}, cannot accept SELL signal.")
+        #         return
+        #     else:
+        #         # no need to check exposure for sell signal
+        #         logger.info(f"Accepted SELL signal for {symbol}. Current exposure: {current_exposure}/{max_exposure}")
+        #         self.entry_position(symbol, direction)
 
     def entry_position(self, symbol: str, direction: str = None):
-        if direction is None:
-            logger.info("No direction provided for order entry.")
+        entry_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
+        try:
+            self.api.place_market_order(
+            symbol=symbol,
+            side=direction,
+            qty=self.current_position_size,
+            )
+            logger.info(f"Placed market order for {symbol} with quantity: {self.current_position_size:.3f}")
+        except Exception as e:
+            logger.error(f"Failed to place market order for {symbol}: {e}")
             return None
+
+        # if direction is None:
+        #     logger.info("No direction provided for order entry.")
+        #     return None
             
-        portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-        # if no existing position, calculate position size
-        if portfolio_stats['position'] is None or portfolio_stats['position']['qty'] == 0:
-            logger.info(f"No open position for {symbol}, calculating position size.")
-            if not self.current_position_size:
-                logger.warning(f"Could not calculate position size for {symbol}. Skipping trade.")
-                return None
+        # portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
+        # # if no existing position, calculate position size
+        # if portfolio_stats['position'] is None or portfolio_stats['position']['qty'] == 0:
+        #     logger.info(f"No open position for {symbol}, calculating position size.")
+        #     if not self.current_position_size:
+        #         logger.warning(f"Could not calculate position size for {symbol}. Skipping trade.")
+        #         return None
             
-            try:
-                # default to market order
-                if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
-                    logger.warning(f"No orderbook data available for {symbol}")
-                    return None
+        #     try:
+        #         # default to market order
+        #         if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
+        #             logger.warning(f"No orderbook data available for {symbol}")
+        #             return None
 
-                entry_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
+        #         entry_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
                 
-                logger.info(f"Placing {direction} order for {symbol} with quantity: {self.current_position_size}")
+        # #         logger.info(f"Placing {direction} order for {symbol} with quantity: {self.current_position_size}")
                 
-                self.api.place_market_order(
-                    symbol=symbol,
-                    side=direction,
-                    qty=self.current_position_size,
-                )
-                logger.info(f"Placed market order for {symbol} with quantity: {self.current_position_size}")
+        #         try:
+        #             self.api.place_market_order(
+        #                 symbol=symbol,
+        #                 side=direction,
+        #                 qty=self.current_position_size,
+        #             )
+        #             logger.info(f"Placed market order for {symbol} with quantity: {self.current_position_size:.3f}")
 
-                self.active_trades[symbol] = {
-                    "entry_price": entry_price,
-                    "quantity": self.current_position_size,
-                    "trade_direction": direction
-                }
+        #             self.active_trades[symbol] = {
+        #                 "entry_price": entry_price,
+        #                 "quantity": self.current_position_size,
+        #                 "trade_direction": direction
+        #             }
+        #         except Exception as e:
+        #             logger.error(f"Failed to place order: {e}")
+        #             if "Margin is insufficient" in str(e):
+        #                 logger.warning("Insufficient margin. Please check your account balance and leverage settings.")
+        #             return None
                 
-                # stop loss and take profit levels
-                # todo: not used here, need to groom
-                if self.current_atr is not None:
-                    stop_loss = entry_price - (self.current_atr * 1.5)
-                    take_profit = entry_price + (self.current_atr * 2.0)
-                    return stop_loss, take_profit
-                
-            except Exception as e:
-                logger.error(f"Failed to place market order for {symbol}: {e}")
-                return None
+        #     except Exception as e:
+        #         logger.error(f"Failed to place market order for {symbol}: {e}")
+        #         return None
 
-    def manage_position(self, symbol: str, atr_multiplier=1.0):
-        portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-        position = portfolio_stats['position']
+    # def manage_position(self, symbol: str, atr_multiplier=1.0):
+    #     portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
+    #     position = portfolio_stats['position']
         
-        if position is None or position['qty'] == 0:
-            logger.info(f"No open position for {symbol} to manage.")
-            return
+    #     if position is None or position['qty'] == 0:
+    #         logger.info(f"No open position for {symbol} to manage.")
+    #         return
             
-        try:
-            entry_price = position['average_price']
-            qty = position['qty']
-            direction = "LONG" if qty > 0 else "SHORT"
-            unrealized_pnl = portfolio_stats['unrealized_pnl'] or 0.0
+    #     try:
+    #         entry_price = position['average_price']
+    #         qty = position['qty']
+    #         direction = "LONG" if qty > 0 else "SHORT"
+    #         unrealized_pnl = portfolio_stats['unrealized_pnl'] or 0.0
 
-            atr = self.current_atr
-            if atr is None:
-                logger.warning(f"Could not calculate ATR for {symbol}. Skipping position management.")
-                return
+    #         atr = self.current_atr
+    #         if atr is None:
+    #             logger.warning(f"Could not calculate ATR for {symbol}. Skipping position management.")
+    #             return
                 
-            risk = atr * atr_multiplier
+    #         risk = atr * atr_multiplier
             
-            # Fix orderbook data access
-            if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
-                logger.warning(f"No orderbook data available for {symbol}")
-                return
+    #         # Fix orderbook data access
+    #         if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
+    #             logger.warning(f"No orderbook data available for {symbol}")
+    #             return
                 
-            current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
+    #         current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
             
-            # Calculate both PnL percentage and R-multiple
-            position_value = abs(qty * current_price)
-            pnl_pct = unrealized_pnl / position_value if position_value > 0 else 0
-            r_multiple = (current_price - entry_price) / risk if direction == "LONG" else (entry_price - current_price) / risk
+    #         # Calculate both PnL percentage and R-multiple
+    #         position_value = abs(qty * current_price)
+    #         pnl_pct = unrealized_pnl / position_value if position_value > 0 else 0
+    #         r_multiple = (current_price - entry_price) / risk if direction == "LONG" else (entry_price - current_price) / risk
             
-            logger.info(f"Position metrics for {symbol}: PnL%={pnl_pct:.2%}, R-multiple={r_multiple:.2f}")
+    #         logger.info(f"Position metrics for {symbol}: PnL%={pnl_pct:.2%}, R-multiple={r_multiple:.2f}")
             
-            # adjust take profit and stop loss 
-            if direction == "LONG":
-                if pnl_pct >= 0.02 and r_multiple >= 2.0:  
-                    new_sl = entry_price + (0.5 * risk)  # tighter stop loss
-                    new_tp = current_price + (1.5 * risk) # higher take profit
-                elif pnl_pct >= 0.01 or r_multiple >= 1.5:  
-                    new_sl = entry_price + risk
-                    new_tp = current_price + (2 * risk)
-                else:
-                    new_sl = entry_price - risk
-                    new_tp = current_price + (2 * risk)
+    #         # adjust take profit and stop loss 
+    #         if direction == "LONG":
+    #             if pnl_pct >= 0.02 and r_multiple >= 2.0:  
+    #                 new_sl = entry_price + (0.5 * risk)  # tighter stop loss
+    #                 new_tp = current_price + (1.5 * risk) # higher take profit
+    #             elif pnl_pct >= 0.01 or r_multiple >= 1.5:  
+    #                 new_sl = entry_price + risk
+    #                 new_tp = current_price + (2 * risk)
+    #             else:
+    #                 new_sl = entry_price - risk
+    #                 new_tp = current_price + (2 * risk)
             
-            elif direction == "SHORT":
-                if pnl_pct >= 0.02 and r_multiple >= 2.0:  
-                    new_sl = entry_price - (0.5 * risk)  
-                    new_tp = current_price - (1.5 * risk) 
-                elif pnl_pct >= 0.01 or r_multiple >= 1.5:  
-                    new_sl = entry_price - risk
-                    new_tp = current_price - (2 * risk)
-                else:
-                    new_sl = entry_price + risk
-                    new_tp = current_price - (2 * risk)
+    #         elif direction == "SHORT":
+    #             if pnl_pct >= 0.02 and r_multiple >= 2.0:  
+    #                 new_sl = entry_price - (0.5 * risk)  
+    #                 new_tp = current_price - (1.5 * risk) 
+    #             elif pnl_pct >= 0.01 or r_multiple >= 1.5:  
+    #                 new_sl = entry_price - risk
+    #                 new_tp = current_price - (2 * risk)
+    #             else:
+    #                 new_sl = entry_price + risk
+    #                 new_tp = current_price - (2 * risk)
                     
-            logger.info(f"Calculated levels for {symbol}: SL={new_sl:.2f}, TP={new_tp:.2f}")
+    #         logger.info(f"Calculated levels for {symbol}: SL={new_sl:.2f}, TP={new_tp:.2f}")
                     
-            try:
-                # existing open orders
-                open_orders = self.api.get_open_orders(symbol=symbol)
-                logger.info(f"Current open orders: {open_orders}")
+    #         try:
+    #             # existing open orders
+    #             open_orders = self.api.get_open_orders()
+    #             logger.info(f"Current open orders: {open_orders}")
+    #             if open_orders is None:
+    #                 logger.warning(f"No open orders found for {symbol}.")
+    #                 return
 
-                update_order = False # default
-                current_tp = None 
-                current_sl = None
+    #             update_order = False # default
+    #             current_tp = None 
+    #             current_sl = None
 
-                for order in open_orders:
-                    if direction == "LONG":
-                        if order['type'] == 'STOP_MARKET' and order['side'] == 'SELL':
-                            current_sl = float(order['stopPrice'])
-                        elif order['type'] == 'TAKE_PROFIT_MARKET' and order['side'] == 'SELL':
-                            current_tp = float(order['stopPrice'])
-                    elif direction == "SHORT":
-                        if order['type'] == 'STOP_MARKET' and order['side'] == 'BUY':
-                            current_sl = float(order['stopPrice'])
-                        elif order['type'] == 'TAKE_PROFIT_MARKET' and order['side'] == 'BUY':
-                            current_tp = float(order['stopPrice'])
+    #             for order in open_orders:
+    #                 if direction == "LONG":
+    #                     if order['type'] == 'STOP_MARKET' and order['side'] == 'SELL':
+    #                         current_sl = float(order['stopPrice'])
+    #                     elif order['type'] == 'TAKE_PROFIT_MARKET' and order['side'] == 'SELL':
+    #                         current_tp = float(order['stopPrice'])
+    #                 elif direction == "SHORT":
+    #                     if order['type'] == 'STOP_MARKET' and order['side'] == 'BUY':
+    #                         current_sl = float(order['stopPrice'])
+    #                     elif order['type'] == 'TAKE_PROFIT_MARKET' and order['side'] == 'BUY':
+    #                         current_tp = float(order['stopPrice'])
 
-                # cancel tp if sl is filled (vice versa)
-                if current_sl is None and new_tp is not None:
-                    self.api.cancel_order(symbol=symbol)
-                    logger.info(f"Take profit filled for {symbol}, cancelling stop loss order.")
-                    return
-                if current_tp is None and new_sl is not None:
-                    self.api.cancel_order(symbol=symbol)
-                    logger.info(f"Stop loss filled for {symbol}, cancelling take profit order.")
-                    return
+    #                 # cancel tp if sl is filled (vice versa)
+    #                 if current_sl is None and new_tp is not None:
+    #                     self.api.cancel_order(symbol=symbol, order_id=order['orderId'])
+    #                     logger.info(f"Take profit filled for {symbol}, cancelling stop loss order.")
+    #                     return
+    #                 if current_tp is None and new_sl is not None:
+    #                     self.api.cancel_order(symbol=symbol, order_id=order['orderId'])
+    #                     logger.info(f"Stop loss filled for {symbol}, cancelling take profit order.")
+    #                     return
 
-                # check diff to see if we need to update orders
-                if abs(current_sl - new_sl) > 0.01 or abs(current_tp - new_tp) > 0.01:
-                    update_order = True
-                    logger.info(f"Updating stop loss and take profit orders for {symbol}.")
+    #             # check diff to see if we need to update orders
+    #             if abs(current_sl - new_sl) > 0.01 or abs(current_tp - new_tp) > 0.01:
+    #                 update_order = True
+    #                 logger.info(f"Updating stop loss and take profit orders for {symbol}.")
 
-                if update_order:
-                    # cancel existing orders
-                    self.api.cancel_open_orders(symbol=symbol)
-                    logger.info(f"Cancelled existing orders for {symbol}.")
+    #             if update_order:
+    #                 # cancel existing orders
+    #                 self.api.cancel_open_orders(symbol=symbol)
+    #                 logger.info(f"Cancelled existing orders for {symbol}.")
 
-                    # TODO: these apis dont have some of the arguments, check again
-                    # place new stop loss and take profit orders
-                    logger.info(f"Placing stop loss order for {symbol} at price: {new_sl}")
-                    self.api.place_stop_loss(
-                        side="SELL" if direction == "LONG" else "BUY",
-                        type="STOP_LOSS",
-                        qty=qty,
-                        symbol=symbol,
-                        price=new_sl, 
-                        tif=settings.TIME_IN_FORCE_GTC
-                    )
+    #                 # TODO: these apis dont have some of the arguments, check again
+    #                 # place new stop loss and take profit orders
+    #                 logger.info(f"Placing stop loss order for {symbol} at price: {new_sl}")
+    #                 self.api.place_stop_loss(
+    #                     quantity=qty,
+    #                     price=new_sl
+    #                 )
                     
-                    logger.info(f"Placing take profit order for {symbol} at price: {new_tp}")
-                    self.api.place_take_profit(
-                        side="SELL" if direction == "LONG" else "BUY",
-                        type="TAKE_PROFIT",
-                        qty=qty,
-                        symbol=symbol,
-                        price=new_tp,
-                        tif=settings.TIME_IN_FORCE_GTC
-                    )
+    #                 logger.info(f"Placing take profit order for {symbol} at price: {new_tp}")
+    #                 self.api.place_take_profit(
+    #                     quantity=qty,
+    #                     price=new_tp
+    #                 )
                 
-            except Exception as e:
-                logger.error(f"Error managing orders for {symbol}: {e}", exc_info=True)
-        except Exception as e:
-            logger.error(f"Error managing position for {symbol}: {e}", exc_info=True)
+    #         except Exception as e:
+    #             logger.error(f"Error managing orders for {symbol}: {e}", exc_info=True)
+    #     except Exception as e:
+    #         logger.error(f"Error managing position for {symbol}: {e}", exc_info=True)
 
             
-    ## total portfolio risk
-    # here liquidates the position -> need to trigger position
-    def calculate_drawdown_limits(self, symbol) -> bool:
-        portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-        portfolio_value = portfolio_stats['total_pnl'] if portfolio_stats else 0.0
+    # ## total portfolio risk
+    # # here liquidates the position -> need to trigger position
+    # def calculate_drawdown_limits(self, symbol) -> bool:
+    #     portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
+    #     portfolio_value = portfolio_stats['total_pnl'] if portfolio_stats else 0.0
         
-        if symbol not in self.df_candlestick or self.df_candlestick[symbol].empty:
-            logger.warning(f"No candlestick data available for {symbol} for drawdown calculations.")
-            return True
+    #     if symbol not in self.df_candlestick or self.df_candlestick[symbol].empty:
+    #         logger.warning(f"No candlestick data available for {symbol} for drawdown calculations.")
+    #         return True
             
-        try:
-            df_candlestick = self.df_candlestick[symbol]
-            peak_value = df_candlestick['high'].max() 
-            trough_value = df_candlestick['low'].min()
+    #     try:
+    #         df_candlestick = self.df_candlestick[symbol]
+    #         peak_value = df_candlestick['high'].max() 
+    #         trough_value = df_candlestick['low'].min()
             
-            if self.current_value == 0.0:
-                self.current_value = portfolio_value
-                return True
+    #         if self.current_value == 0.0:
+    #             self.current_value = portfolio_value
+    #             return True
                 
-            logger.debug(f"Current portfolio value: {portfolio_value}")
-            logger.debug(f"Current value: {self.current_value}")
-            logger.debug(f"Peak value from candlesticks: {peak_value}")
-            logger.debug(f"Trough value from candlesticks: {trough_value}")
+    #         logger.info(f"Current portfolio value: {portfolio_value}")
+    #         logger.info(f"Current value: {self.current_value}")
+    #         logger.info(f"Peak value from candlesticks: {peak_value}")
+    #         logger.info(f"Trough value from candlesticks: {trough_value}")
 
-            relative_dd = (peak_value - portfolio_value) / peak_value if peak_value > 0 else 0
-            absolute_dd = (portfolio_value - self.current_value) / self.current_value if self.current_value > 0 else 0
+    #         relative_dd = (peak_value - portfolio_value) / peak_value if peak_value > 0 else 0
+    #         absolute_dd = (portfolio_value - self.current_value) / self.current_value if self.current_value > 0 else 0
+
             
-            logger.debug(f"Relative drawdown: {relative_dd:.2%}, Absolute drawdown: {absolute_dd:.2%}")
-            
-            if relative_dd > self.max_relative_drawdown or absolute_dd > self.max_absolute_drawdown:
-                logger.warning(f"Drawdown limits breached.")
-                self.circuit_breaker.force_open(f"Drawdown limit breached. Relative dd: {relative_dd:.2%}, Absolute dd: {absolute_dd:.2%}.")
-                for symbol, position in self.portfolio_manager.get_positions().items():
-                    qty = position['qty']
-                    try:
-                        # liquidate position
-                        self.api.place_market_order(
-                            side="SELL",
-                            qty=qty,
-                            symbol=symbol
-                        )
-                        logger.info(f"Liquidated position for {symbol}:{qty} units.")
-                    except Exception as e:
-                        logger.error(f"Unable to liquidate position for {symbol}: {e}.")
-                return False
-            return True
-        except Exception as e:
-            logger.error(f"Error calculating drawdown limits: {e}", exc_info=True)
-            return True  
+    #         if relative_dd > self.max_relative_drawdown or absolute_dd > self.max_absolute_drawdown:
+    #             logger.warning(f"Drawdown limits breached. Relative dd: {relative_dd:.2%}, Absolute dd: {absolute_dd:.2%}.")
+
+    #             for symbol, position in self.portfolio_manager.get_positions().items():
+    #                 qty = position['qty']
+    #                 try:
+    #                     if qty > 0:
+    #                         logger.info(f"Liquidating long position for {symbol}:{qty} units.")
+    #                         # liquidate position
+    #                         self.api.place_market_order(
+    #                             side="SELL",
+    #                             qty=qty,
+    #                             symbol=symbol
+    #                         )
+    #                     logger.info(f"Liquidated position for {symbol}:{qty} units.")
+    #                     self.circuit_breaker.force_open(f"Drawdown limit breached.")
+    #                 except Exception as e:
+    #                     logger.error(f"Unable to liquidate position for {symbol}: {e}.")
+    #             return False
+    #         return True
+    #     except Exception as e:
+    #         logger.error(f"Error calculating drawdown limits: {e}", exc_info=True)
+    #         return True  
         
 
     
