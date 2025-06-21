@@ -129,7 +129,7 @@ def signal_consumer_loop():
             if signal is not None:
                 # signal is actually a pair value
                 risk_manager.on_signal_update(signal[1], symbol)
-        time.sleep(1)
+        time.sleep(0.1)
 
 def order_consumer_loop():
     while True:
@@ -137,7 +137,7 @@ def order_consumer_loop():
             data = order_queue.pop()
             if data[1] is not None:
                 order_manager.save_execution_updates(data[1])
-        time.sleep(1)
+        time.sleep(0.1)
 
 def main():
     logger.info(f"Start trading..")

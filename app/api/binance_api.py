@@ -73,7 +73,7 @@ class BinanceApi:
             }
             return res
 
-    def place_stop_loss(self, quantity: float, price: float) -> bool:
+    def place_stop_loss(self, side: Side, quantity: float, price: float) -> bool:
         try: 
             self.check_client_exist()
             order_response = self._client.futures_create_order(
@@ -84,12 +84,13 @@ class BinanceApi:
                                               closePosition=True,
                                               quantity=quantity,
                                               timeInForce='GTC')
+            logger.info(f"Stop loss order placed: {order_response}")
             return order_response
         except Exception as e:
             api_logger.warning("Failed to create stop loss order: {}".format(e))
             return False
         
-    def place_take_profit(self, quantity: float, price: float) -> bool:
+    def place_take_profit(self, side: Side, quantity: float, price: float) -> bool:
         try:
             self.check_client_exist()
             order_response = self._client.futures_create_order(
@@ -100,6 +101,7 @@ class BinanceApi:
                                               closePosition=True,
                                               quantity=quantity,
                                               timeInForce='GTC')
+            logger.info(f"Take profit order placed: {order_response}")
             return order_response
         except Exception as e:
             api_logger.warning("Failed to create take profit order: {}".format(e))
@@ -111,6 +113,7 @@ class BinanceApi:
             order_response = self._client.futures_cancel_order(
                                             symbol=symbol.upper(),
                                             orderId=order_id)
+            logger.info(f"Order cancelled: {order_response}")
             return order_response
         except Exception as e:
             api_logger.warning("Failed to cancel order: {}, {}".format(e))
@@ -136,6 +139,15 @@ class BinanceApi:
             return self._client.futures_account_balance()
         except Exception as e:
             error_msg = f"Failed to retrieve account balance: {e}"
+            api_logger.warning(error_msg)
+            return {"errorMsg": error_msg}
+        
+    def get_open_orders(self, symbol: str) -> list:
+        try:
+            self.check_client_exist()
+            return self._client.futures_get_open_orders(symbol=symbol.upper())
+        except Exception as e:
+            error_msg = f"Failed to retrieve open orders: {e}"
             api_logger.warning(error_msg)
             return {"errorMsg": error_msg}
 

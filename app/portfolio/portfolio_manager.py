@@ -162,7 +162,8 @@ class PortfolioManager:
             'last_market_price': self.last_market_price.get(symbol.upper()),
             'realized_pnl': self.realized_pnl,
             'total_commissions': self.total_commissions,
-            'total_pnl': self.get_total_pnl()
+            'total_pnl': self.get_total_pnl(),
+            'cash_balance': self.cash # placeholder 
         }
 
     def get_positions(self):

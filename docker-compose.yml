@@ -24,22 +24,23 @@ services:
       - .env
     volumes:
       - ./pg_data:/var/lib/postgresql/data
-      - ./pg_hba.conf:/var/lib/postgresql/data/pg_hba.conf
+      # - ./pg_hba.conf:/etc/postgresql/pg_hba.conf
+
     healthcheck:
       test: [ "CMD", "pg_isready", "-U", "${APP_PG_USER}", "-d", "${APP_PG_DB}" ]
       interval: 5s
       retries: 5
 
-#   db-migrator:
-#     build:
-#       context: .
-#     command: ["./db/migrate.sh"]
-#     depends_on:
-#       postgres:
-#         condition: service_healthy
-#     env_file:
-#       - .env
-#     restart: "no"
+  db-migrator:
+    build:
+      context: .
+    command: ["bash","./db/migrate.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    restart: "no"
 
 #   trading-bot:
 #     build:
@@ -47,6 +48,8 @@ services:
 #     command: ["python3", "app/main.py"]
 #     depends_on:
 #       - redis
+#     postgres:
+#         condition: service_healthy
 # #    network_mode: host
 #     ports:
 #       - "8080:8080"
