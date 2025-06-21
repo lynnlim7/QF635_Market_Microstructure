@@ -62,6 +62,25 @@ register_routes(app, binance_api)
 signal_queue = LockingQueue()
 order_queue = LockingQueue()
 
+# Global shutdown flag
+emergency_shutdown_triggered = False
+
+def emergency_shutdown_callback(reason: str):
+    global emergency_shutdown_triggered
+    logger.critical(f"Emergency shutdown callback triggered: {reason}")
+    
+    if not emergency_shutdown_triggered:
+        emergency_shutdown_triggered = True
+        
+        # Trigger emergency liquidation in risk manager
+        if 'risk_manager' in globals():
+            try:
+                risk_manager.emergency_liquidation()
+            except Exception as e:
+                logger.error(f"Error during emergency liquidation: {e}")
+        
+        logger.critical("All trading activity stopped and positions liquidated.")
+
 def start_binance() -> None:
     logger.info("Starting binance now")
     global gateway_instance
@@ -124,6 +143,10 @@ def signal_callback(signal: int):
 
 def signal_consumer_loop():
     while True:
+        if emergency_shutdown_triggered:
+            logger.critical("Emergency shutdown: Signal consumer loop stopped.")
+            break
+            
         if not signal_queue.is_empty():
             signal = signal_queue.pop()
             if signal is not None:
@@ -133,17 +156,42 @@ def signal_consumer_loop():
 
 def order_consumer_loop():
     while True:
+        if emergency_shutdown_triggered:
+            logger.critical("Emergency shutdown: Order consumer loop stopped.")
+            break
+            
         if not order_queue.is_empty() and order_manager:
             data = order_queue.pop()
             if data[1] is not None:
                 order_manager.save_execution_updates(data[1])
         time.sleep(0.1)
 
+def background_drawdown_check():
+    while True:
+        if emergency_shutdown_triggered:
+            logger.critical("Emergency shutdown: Background drawdown check stopped")
+            break
+            
+        try:
+            logger.info("Checking drawdown limits...")
+            if not risk_manager.drawdown_limit_check(symbol):
+                logger.warning("Drawdown limits breached. Opening circuit breaker.")
+                circuit_breaker.force_open("Drawdown limits breached.")
+                break
+            else:
+                logger.info("Drawdown limits are within acceptable range.")
+        except Exception as e:
+            logger.error(f"Error in drawdown check: {e}", exc_info=True)
+        time.sleep(30)
+
+
 def main():
     logger.info(f"Start trading..")
 
-    ## initialize modules
     circuit_breaker = redis_pool.create_circuit_breaker()
+    circuit_breaker.set_emergency_callback(emergency_shutdown_callback)
+    logger.info("Emergency shutdown callback registered with circuit breaker")
+    
     global strategy_instance
 
     strategy_instance = RandomStrategy(symbol)
@@ -151,8 +199,11 @@ def main():
     strategy_instance.register_callback(signal_callback)
     logger.info("Strategy instance created and callback registered")
 
-
     while True:
+        if emergency_shutdown_triggered:
+            logger.critical("Stopping all trading activity")
+            break
+            
         time.sleep(60)
 
     # currently no need to run this:
@@ -238,4 +289,5 @@ if __name__ == "__main__":
     threading.Thread(target=signal_consumer_loop, daemon=True).start()
     threading.Thread(target=order_consumer_loop, daemon=True).start()
     # threading.Thread(target=lambda: asyncio.run(run_trade_analysis()), daemon=True).start()
+    threading.Thread(target=background_drawdown_check, daemon=True).start()
     main()

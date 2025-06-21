@@ -10,6 +10,7 @@ class PortfolioManager:
         self.unrealized_pnl = {} # {symbol (upper Case): float } e.g. {"BTCUSDT":3.4,"ETHUSDT":-1.3}
         self.last_market_price = {} # {symbol (upper Case): {"best_bid": float, "best_ask":float} }
         self.total_commissions = 0.0
+        self.cash = 0.0 # placeholder
 
         self.open_orders = [] # to be determined
         self.trade_history: list[OrderEventUpdate] = []
@@ -163,7 +164,7 @@ class PortfolioManager:
             'realized_pnl': self.realized_pnl,
             'total_commissions': self.total_commissions,
             'total_pnl': self.get_total_pnl(),
-            'cash_balance': self.cash # placeholder 
+            'cash_balance': self.cash
         }
 
     def get_positions(self):

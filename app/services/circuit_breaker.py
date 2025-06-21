@@ -15,11 +15,13 @@ class RedisCircuitBreaker:
             failure_threshold: int = 10, 
             success_threshold: int = 3,
             reset_timeout: int = 60,
+            emergency_callback: Callable = None,
         ):
         self.redis = redis.Redis.from_pool(pool)
         self.success_threshold = success_threshold
         self.failure_threshold = failure_threshold
         self.reset_timeout = reset_timeout
+        self.emergency_callback = emergency_callback
 
         # redis keys 
         self.breaker_state = "circuit_breaker:state"
@@ -90,7 +92,18 @@ class RedisCircuitBreaker:
             self.redis.set(self.breaker_state, "open")
             self.redis.set(self.trigger_breaker, 1)
             logger.warning(f"Circuit breaker forced open. Reason: {reason}")
+            
+            # Trigger emergency callback if set
+            if self.emergency_callback:
+                try:
+                    logger.critical("Triggering emergency callback due to circuit breaker force open!")
+                    self.emergency_callback(reason)
+                except Exception as e:
+                    logger.error(f"Error in emergency callback: {e}")
 
+    # called when circuit breaker is forced open
+    def set_emergency_callback(self, callback: Callable):
+        self.emergency_callback = callback
 
    
 

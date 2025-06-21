@@ -6,7 +6,6 @@ from app.utils.logger import main_logger as logger
 from app.portfolio.portfolio_manager import PortfolioManager
 from app.api.binance_api import BinanceApi
 from app.services.circuit_breaker import RedisCircuitBreaker
-import threading, time
 
 #TODO: explain thought process on take profit/ stop loss - should we sell everything? or pause trading
 #TODO: listen to depth order book and take the mid price from best bid and ask
@@ -41,6 +40,10 @@ class RiskManager:
         self.current_value = 0.0
         self.current_position_size = None
         self.current_atr = None
+        self.emergency_shutdown = False
+        self.peak_value = None
+        self.initial_value = None
+        self.real_data_initialized = False
 
     def on_new_orderbook(self, data:dict):
         if not isinstance(data, dict):
@@ -50,7 +53,7 @@ class RiskManager:
         logger.info("Processing orderbook data.")
 
         timestamp = pd.to_datetime(data.get("timestamp", None), unit='ms')
-        symbol = data.get('contract_name', self.symbol).upper()  
+        symbol = data.get('contract_name', self.symbol).upper()
         
         logger.info(f"Processing orderbook for symbol: {symbol}")
 
@@ -107,7 +110,6 @@ class RiskManager:
                 self.df_candlestick[symbol] = pd.concat([self.df_candlestick[symbol], df_candlestick]).tail(500)
 
             self.calculate_atr()
-            # self.calculate_drawdown_limits(symbol)
     
     # average true range - measure price vol of asset approx 14 days 
     def calculate_atr(self, period=14):
@@ -184,8 +186,18 @@ class RiskManager:
             return
         logger.info(f"=====RECEIVED SIGNAL UPDATE=====: {signal} for {symbol}")
 
-    def entry_position(self, symbol: str, direction: str = None, size:float):
+    def get_closing_direction(self, current_position_size: float) -> str:
+        """Determine the correct direction to close a position."""
+        if current_position_size > 0:
+            return "SELL"  # Close long position
+        elif current_position_size < 0:
+            return "BUY"   # Close short position
+        else:
+            return None    # No position to close
+
+    def entry_position(self, symbol: str, size: float, direction: str = None):
         try:
+            logger.info(f"Trying to place market order in api: {symbol} , side: {direction}, qty: {size}")
             self.api.place_market_order(
             symbol=symbol,
             side=direction,
@@ -196,17 +208,36 @@ class RiskManager:
             return None
     
     def on_signal_update(self, signal:int, symbol:str):
+        # Check for emergency shutdown first
+        if self.emergency_shutdown:
+            logger.warning(f"EMERGENCY SHUTDOWN ACTIVE: Ignoring signal {signal} for {symbol}")
+            return
+            
+        # Check circuit breaker status
+        if self.check_circuit_breaker_status():
+            logger.warning(f"Circuit breaker is OPEN: Ignoring signal {signal} for {symbol}")
+            return
+            
         self.accept_signal(signal, symbol)
         direction = self.trade_directions(signal)
+
+        # symbol = symbol.upper()
 
         ## from portfolio manager 
         portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
         print(f"Portfolio stats: {portfolio_stats}!!!!!!!!!!!!!!!!")
 
         position = portfolio_stats.get('position')
-        current_position_size = position.get('qty', 0.0) if position else 0.0
-        unrealized_pnl = portfolio_stats.get('unrealized_pnl', 0.0)
+        current_position_size = round(position.get('qty', 0.0) if position else 0.0, 8)
+        unrealized_pnl = portfolio_stats.get('unrealized_pnl', 0.0) if position else 0.0
         cash_balance = portfolio_stats.get('cash_balance', 0.0)
+
+        logger.info(f"Current position size for {symbol}: {current_position_size}")
+
+        if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
+            logger.warning(f"No orderbook data available for {symbol}. Available symbols: {list(self.df_orderbook.keys())}")
+            return
+        
         current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
 
         total_portfolio_value = cash_balance + unrealized_pnl
@@ -217,6 +248,13 @@ class RiskManager:
         # result from manage position (tp/sl)
         result = self.manage_position(symbol)
 
+        # TODO: think of how to handle this
+        # set threshold to deal with error in case of extremely small position size 
+        position_size_threshold = 1e-10
+
+        if abs(current_position_size) < position_size_threshold:
+            current_position_size = 0.0
+
         # on new buy signal
         if direction == "BUY":
             logger.info(f"Processing BUY signal for {symbol}")
@@ -225,9 +263,10 @@ class RiskManager:
             if current_position_size == 0.0:
                 logger.info(f"No open position for {symbol}, placing new BUY order to enter long position.")
                 size = self.calculate_position_size()
+                print(f"Size: {size}!!!!!!!!!!!!!!!!!!!!!!!!")
                 if size:
                     self.current_position_size = size
-                    self.entry_position(symbol, direction, size)
+                    self.entry_position(symbol, size, direction)
                     logger.info(f"Initial position for {symbol} price: {current_price:.4f}")
                 else:
                     logger.warning(f"Unable to calculate position size for {symbol}, skipping order placement.")
@@ -238,7 +277,8 @@ class RiskManager:
             elif current_position_size > 0.0:
                 if result.get("TP/SL hit", True):
                     logger.info(f"Take profit or stop loss hit for {symbol}, closing position.")
-                    self.entry_position(symbol, "SELL", current_position_size)
+                    closing_direction = self.get_closing_direction(current_position_size)
+                    self.entry_position(symbol, current_position_size, closing_direction)
                     return
                 # decide whether to scale position
                 if current_exposure >= max_exposure:
@@ -253,13 +293,14 @@ class RiskManager:
                     size = self.calculate_position_size()
                     if size:
                         logger.info(f"Scaling position for {symbol} with additional size: {size:.4f}")
-                        self.entry_position(symbol, "BUY", size)
+                        self.entry_position(symbol, size, direction)
 
             # existing short position
             elif current_position_size < 0.0:
                 if result.get("TP/SL hit", True):
                     logger.info(f"Take profit or stop loss hit for {symbol}, closing short position.")
-                    self.entry_position(symbol, "BUY", current_position_size)
+                    closing_direction = self.get_closing_direction(current_position_size)
+                    self.entry_position(symbol, abs(current_position_size), closing_direction)
 
         # on new sell signal 
         elif direction == "SELL":
@@ -271,7 +312,7 @@ class RiskManager:
                 size = self.calculate_position_size()
                 if size:
                     self.current_position_size = size
-                    self.entry_position(symbol, direction, size)
+                    self.entry_position(symbol, size, direction)
                     logger.info(f"Initial position for {symbol} price: {current_price:.4f}")
                 else:
                     logger.warning(f"Unable to calculate position size for {symbol}, skipping order placement.")
@@ -282,7 +323,8 @@ class RiskManager:
             elif current_position_size < 0.0:
                 if result.get("TP/SL hit", True):
                     logger.info(f"Take profit or stop loss hit for {symbol}, closing position.")
-                    self.entry_position(symbol, "SELL", current_position_size)
+                    closing_direction = self.get_closing_direction(current_position_size)
+                    self.entry_position(symbol, abs(current_position_size), closing_direction)
                     return
                 # decide whether to scale position
                 elif current_exposure >= max_exposure:
@@ -292,47 +334,60 @@ class RiskManager:
                     if result.get("TP/SL hit", False):
                         logger.info(f"Take profit or stop loss hit for {symbol}, holding position.")
                         return
+                    size = self.calculate_position_size()
                     if size: 
                         logger.info(f"Current exposure within threshold. Scaling position for {symbol}.")
-                        self.entry_position(symbol, "SELL", size)
+                        self.entry_position(symbol, size, direction)
 
             # existing long position
             elif current_position_size > 0.0:
                 if result.get("TP/SL hit", True):
                     logger.info(f"Take profit or stop loss hit for {symbol}, closing long position.")
-                    self.entry_position(symbol, "SELL", current_position_size)
-
-
+                    closing_direction = self.get_closing_direction(current_position_size)
+                    self.entry_position(symbol, current_position_size, closing_direction)
+        else:
+            logger.info(f"Holding position for {symbol} as no valid signal received.")
 
     def manage_position(self, symbol:str, atr_multiplier:float=1.0):
         logger.info(f"Managing position for {symbol}.")
 
         ## from portfolio manager
         portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-        trade_dtls = self.portfolio_manager.on_new_trade()
 
-        entry_price = float(trade_dtls.get('average_price', '0.0')) # filled price
         position = portfolio_stats.get('position')
-        current_position_size = position.get('qty', 0.0) if position else 0.0
+        entry_price = float(position.get('average_price', '0.0')) if position else 0.0 # filled price
+        current_position_size = round(position.get('qty', 0.0) if position else 0.0, 8)
         unrealized_pnl = portfolio_stats.get('unrealized_pnl', 0.0)
 
-        # current_price = self.df_orderbook[self.symbol]['mid_price'].iloc[-1]
-        current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
+        if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
+            logger.warning(f"No orderbook data available for {symbol}. Available symbols: {list(self.df_orderbook.keys())}")
 
-        
-        print(f"Entry price: {entry_price}!!!!!!!!!!!!!!!!")
-        print(f"Position amount: {current_position_size}!!!!!!!!!!!!!!!!")
+        current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
 
         current_atr = float(self.current_atr)
 
-        if current_position_size >0:
+        # TODO: think of how to handle this
+        # set threshold to deal with error in case of extremely small position size 
+        position_size_threshold = 1e-10
+
+        if abs(current_position_size) < position_size_threshold:
+            current_position_size = 0.0
+
+        if current_position_size > 0.0:
             direction = "LONG"
-        elif current_position_size < 0:
+        elif current_position_size < 0.0:
             direction = "SHORT"
         else:
             direction = "FLAT"
+            logger.info(f"No open position to manage for {symbol}.")
+            return{
+                "TP/SL hit": False,
+                "new_sl": None,
+                "new_tp": None,
+                'r_multiple': 0.0,
+                'pnl_pct': 0.0,
+            }
 
-        
         try:
             risk = current_atr * atr_multiplier
             position_value = abs(current_position_size * entry_price)
@@ -394,31 +449,201 @@ class RiskManager:
 
             
     # total portfolio risk - throttle every 30s in the background
-    # here liquidates the position -> need to trigger position
     def drawdown_limit_check(self, symbol) -> bool:
         logger.info(f"Checking drawdown limits for {symbol}.")
-        current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
-        portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-        cash_balance = portfolio_stats.get('cash_balance', 0.0)
-        current_position_size = portfolio_stats.get('position', {}).get('qty', 0.0)
-        portfolio_value = cash_balance + (current_position_size * current_price)
+
+        if not self.real_data_initialized:
+            self.initialize_drawdown_tracking()
+            
+        portfolio_value = self.get_portfolio_value()
+        
+        # skip drawdown check 
+        if portfolio_value <= 0:
+            logger.info(f"Portfolio value is {portfolio_value}, skipping drawdown check until data is available.")
+            return False, 0.0, 0.0
+        
         if self.peak_value is None:
             self.peak_value = portfolio_value
         if self.initial_value is None:
             self.initial_value = portfolio_value
-                
-        logger.info(f"Current portfolio value: {portfolio_value}")
-        logger.info(f"Initial value: {self.initial_value}")
-
+            
+        # update peak value 
         self.peak_value = max(self.peak_value, portfolio_value)
-        relative_dd = (self.peak_value - portfolio_value) / self.peak_value 
-        absolute_dd = (self.initial_value - portfolio_value) / self.initial_value
+        
+        relative_dd = (self.peak_value - portfolio_value) / self.peak_value if self.peak_value > 0 else 0.0
+        absolute_dd = (self.initial_value - portfolio_value) / self.initial_value if self.initial_value > 0 else 0.0
 
-        if relative_dd >= self.max_relative_drawdown or absolute_dd >= self.max_absolute_drawdown:
-            logger.warning(f"Drawdown limits breached. Relative dd: {relative_dd:.2%}, Absolute dd: {absolute_dd:.2%}.")
-            self.circuit_breaker.force_open(f"Drawdown limit breached for {symbol}.")
-            return True, relative_dd, absolute_dd
+        logger.info(f"Drawdown metrics - Relative: {relative_dd:.2%}, Absolute: {absolute_dd:.2%}")
+
+        # drawdown checks
+        if self.peak_value > 0 and self.initial_value > 0:
+            if relative_dd >= self.max_relative_drawdown or absolute_dd >= self.max_absolute_drawdown:
+                logger.critical(f"Drawdown limits breached! Relative dd: {relative_dd:.2%}, Absolute dd: {absolute_dd:.2%}")
+                
+                logger.critical("Initiating emergency liquidation due to drawdown breach...")
+                self.emergency_liquidation()
+                
+                self.circuit_breaker.force_open(f"Drawdown limit breached for {symbol}.")
+                
+                return True, relative_dd, absolute_dd
+        else:
+            logger.info("Skipping drawdown check - insufficient data for calculation.")
+            
         return False, relative_dd, absolute_dd
+
+    def get_positions_from_binance(self) -> dict:
+        try:
+            positions_data = self.api.get_current_position()
+            positions = {}
+            
+            if isinstance(positions_data, list):
+                for position in positions_data:
+                    symbol = position.get('symbol')
+                    qty = float(position.get('positionAmt', 0))
+                    
+                    if qty != 0:  
+                        positions[symbol] = {
+                            'qty': qty,
+                            'entry_price': float(position.get('entryPrice', 0)),
+                            'unrealized_pnl': float(position.get('unRealizedProfit', 0)),
+                            'mark_price': float(position.get('markPrice', 0))
+                        }
+            else:
+                logger.error(f"Unexpected response format from get_current_position: {positions_data}")
+            
+            logger.info(f"Real positions from Binance: {positions}")
+            return positions
+            
+        except Exception as e:
+            logger.error(f"Error getting real positions from Binance: {e}")
+            return {}
+
+    def liquidate_positions(self) -> bool:
+        logger.critical("Liquidating real positions from Binance.")
+        
+        positions = self.get_positions_from_binance()
+        
+        if not positions:
+            logger.info("No positions to liquidate.")
+            return True
+            
+        liquidation_success = True
+        
+        for symbol, position in positions.items():
+            try:
+                qty = abs(position['qty'])
+                direction = "SELL" if position['qty'] > 0 else "BUY"
+                
+                logger.critical(f"Liquidating {symbol}: {qty} via {direction}")
+            
+                self.api.place_market_order(
+                    symbol=symbol,
+                    side=direction,
+                    qty=qty
+                )
+                
+                logger.critical(f"Liquidation order placed for {symbol}: {qty} {direction}")
+                
+            except Exception as e:
+                logger.error(f"Failed to liquidate position for {symbol}: {e}")
+                liquidation_success = False
+                
+        return liquidation_success
+
+    def emergency_liquidation(self) -> bool:
+        logger.critical("Emergency Shutdown: Circuit breaker triggered. Liquiding all positions.")
+        
+        self.emergency_shutdown = True
+        
+        positions_summary = self.get_positions_from_binance()
+        logger.critical(f"Real positions before liquidation: {positions_summary}")
+        
+        # Liquidate real positions from Binance
+        liquidation_success = self.liquidate_positions()
+        
+        if liquidation_success:
+            logger.critical("All positions have been closed.")
+        else:
+            logger.critical("Some positions could not be closed.")
+            
+        return liquidation_success
+
+    def is_emergency_shutdown(self) -> bool:
+        return self.emergency_shutdown
+
+    def check_circuit_breaker_status(self) -> bool:
+        if self.circuit_breaker.get_state() == "open":
+            if not self.emergency_shutdown:
+                logger.critical("Circuit breaker is open- triggering emergency shutdown")
+                self.emergency_liquidation()
+            return True
+        return False
+
+    def initialize_drawdown_tracking(self):
+        try:
+            logger.info("Initializing drawdown tracking with binance data...")
+
+            balance_data = self.api.get_account_balance()
+            real_balance = 0.0
+            
+            if isinstance(balance_data, list):
+                for balance in balance_data:
+                    if balance.get('asset') == 'USDT':
+                        real_balance = float(balance.get('balance', 0))
+                        break
+
+            positions_data = self.api.get_current_position()
+            total_unrealized_pnl = 0.0
+            
+            if isinstance(positions_data, list):
+                for position in positions_data:
+                    qty = float(position.get('positionAmt', 0))
+                    if qty != 0:
+                        unrealized_pnl = float(position.get('unRealizedProfit', 0))
+                        total_unrealized_pnl += unrealized_pnl
+            
+            real_portfolio_value = real_balance + total_unrealized_pnl
+            
+            self.initial_value = real_portfolio_value
+            self.peak_value = real_portfolio_value
+            self.real_data_initialized = True
+            
+            logger.info(f"Drawdown tracking initialized - Initial value: {self.initial_value}, Peak value: {self.peak_value}")
+            logger.info(f"Real balance: {real_balance}, Total unrealized PnL: {total_unrealized_pnl}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize drawdown tracking with real data: {e}")
+            self.real_data_initialized = False
+
+    def get_portfolio_value(self) -> float:
+        try:
+            balance_data = self.api.get_account_balance()
+            print(f"Balance data: {balance_data}!!!!!!!!!!!!!!!!!!!!!!!!")
+            real_balance = 0.0
+            
+            if isinstance(balance_data, list):
+                for balance in balance_data:
+                    if balance.get('asset') == 'USDT':
+                        real_balance = float(balance.get('balance', 0))
+                        break
+            
+            # get positions and calculate total unrealized PnL
+            positions_data = self.api.get_current_position()
+            total_unrealized_pnl = 0.0
+            
+            if isinstance(positions_data, list):
+                for position in positions_data:
+                    qty = float(position.get('positionAmt', 0))
+                    if qty != 0:
+                        unrealized_pnl = float(position.get('unRealizedProfit', 0))
+                        total_unrealized_pnl += unrealized_pnl
+            
+            real_portfolio_value = real_balance + total_unrealized_pnl
+            return real_portfolio_value
+            
+        except Exception as e:
+            logger.error(f"Error getting actual portfolio value: {e}")
+            return 0.0
 
 
     
