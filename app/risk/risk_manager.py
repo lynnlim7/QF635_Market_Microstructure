@@ -87,9 +87,6 @@ class RiskManager:
            
     def on_new_candlestick(self, data):
         logger.info("Processing new candlestick data.")
-        # if not data.get('is_closed', False):
-        #     logger.info("Received incomplete candle, skipping processing.")
-        #     return
         if isinstance(data, dict):
             symbol = data.get('symbol', self.symbol).upper()
             timestamp = pd.to_datetime(data['start_time'], unit='ms')
@@ -187,13 +184,12 @@ class RiskManager:
         logger.info(f"=====RECEIVED SIGNAL UPDATE=====: {signal} for {symbol}")
 
     def get_closing_direction(self, current_position_size: float) -> str:
-        """Determine the correct direction to close a position."""
         if current_position_size > 0:
-            return "SELL"  # Close long position
+            return "SELL"  
         elif current_position_size < 0:
-            return "BUY"   # Close short position
+            return "BUY"   
         else:
-            return None    # No position to close
+            return None    
 
     def entry_position(self, symbol: str, size: float, direction: str = None):
         try:
@@ -331,7 +327,7 @@ class RiskManager:
                     logger.info(f"Max exposure: {max_exposure} reached for {symbol}, ignoring SELL signal.")
                     return
                 elif current_exposure < max_exposure:
-                    if result.get("TP/SL hit", False):
+                    if result.get("TP/SL hit", True):
                         logger.info(f"Take profit or stop loss hit for {symbol}, holding position.")
                         return
                     size = self.calculate_position_size()
