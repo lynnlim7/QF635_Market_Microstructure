@@ -2,14 +2,17 @@ import numpy as np
 import pandas as pd
 from math import sqrt
 import logging
-import redis.asyncio as redis
+import redis
 import json
 from typing import Dict, Any, Optional, List
-from sqlalchemy import create_engine
-import asyncpg
+from sqlalchemy import create_engine, text
 from app.services.redis_pool import RedisPool
 from app.services.redis_sub import RedisSubscriber
 from app.utils.config import settings
+from asyncio import new_event_loop, set_event_loop, run
+from app.utils.func import get_execution_channel
+import psycopg2
+import time
 
 #step 1: implement function to calculate unrealized pnl, comparing with the latest P&L
 #are we able to take unrealized pnl for different time ranges e.g. 1 day, 3 day, 5 day, 1 week
@@ -20,8 +23,8 @@ from app.utils.config import settings
 
 logger = logging.getLogger(__name__)
 
-async def get_postgres_pool():
-    pool = await asyncpg.create_pool(
+def get_postgres_pool():
+    pool = psycopg2.connect(
         user=settings.POSTGRES_USER,
         password=settings.POSTGRES_PASSWORD,
         database=settings.POSTGRES_DB,
@@ -33,32 +36,40 @@ async def get_postgres_pool():
     return pool
 
 # Background listener to DB updates from Redis
-async def listen_for_trades():
+def listen_for_trades():
     logger.info("Starting trade listener...")
-    subscriber = RedisSubscriber([f"{settings.SYMBOL.lower()}:execution"])
+
+    pool = redis.ConnectionPool(host='redis', port=6379, decode_responses=True)
+    channels = [get_execution_channel(settings.SYMBOL)]
+    subscriber = RedisSubscriber(pool, channels)
     analysis = TradeAnalysis()
 
-    async def handle_execution(data: dict):
+    def handle_execution(data: dict):
         logger.info(f"Received trade: {data}")
         try:
-            await analysis.handle_new_trade(data)
+            analysis.handle_new_trade(data)
         except Exception as e:
             logger.error(f"Error processing trade: {e}")
-
-    subscriber.register_async_handler(f"{settings.SYMBOL.lower()}:execution", handle_execution)
-    await subscriber.start_async_subscribing()
+    subscriber.register_handler(get_execution_channel(settings.SYMBOL), handle_execution)
+    while True:
+        try:
+            subscriber.start_subscribing()
+        except Exception as e:
+            logger.error(f"Subscription error: {e}, reconnecting...")
+            time.sleep(5) 
 
 # This function returns the summary
-async def get_trade_summary():
-    pool = await get_postgres_pool()
+def get_trade_summary():
+    pool = get_postgres_pool()
     analysis = TradeAnalysis(db_pool=pool)
-    summary = await analysis.get_summary()
+    summary = analysis.get_summary()
     return summary
 
 # Main callable function from main.py
 def run_trade_analysis():
-    loop = asyncio.get_event_loop()
-    loop.create_task(listen_for_trades())
+    import threading
+    thread = threading.Thread(target=listen_for_trades)
+    thread.start()
 
 class TradeAnalysis:
     #initialize the params
@@ -67,21 +78,29 @@ class TradeAnalysis:
                 current_prices: Optional[Dict[str, float]]= None):
 
         self.current_prices = current_prices or {}
+        self.redis_params = redis_params or {
+            "host": settings.REDIS_HOST,
+            "port": 6379,
+            "db": 0,
+            "decode_responses": False
+        }
         self.redis_pool = RedisPool(
-        host=redis_params.get("host", "localhost"),
-            port=redis_params.get("port", 6379),
-            db=redis_params.get("db", 0),
-            decode_responses=redis_params.get("decode_responses", False),
-            async_pool=True  # Important: TradeAnalysis uses `redis.asyncio`
+        host=self.redis_params.get("host", "localhost"),
+            port=self.redis_params.get("port", 6379),
+            db=self.redis_params.get("db", 0),
+            decode_responses=self.redis_params.get("decode_responses", False)  # Important: TradeAnalysis uses `redis.asyncio`
 )
         self.redis = redis.Redis(connection_pool=self.redis_pool.pool)
         self.df = pd.DataFrame()
+        self.engine = create_engine(
+            f"postgresql://{settings.APP_PG_USER}:{settings.APP_PG_PASSWORD}@{settings.APP_PG_HOST}:{settings.APP_PG_PORT}/{settings.APP_PG_DB}"
+        )
 
         #convert timestamps
         if 'timestamp' in self.df.columns:
             self.df = self.df.sort_values('timestamp')
 
-    async def fetch_current_prices_from_redis(self, symbols: List[str]) -> Dict[str,float]:
+    def fetch_current_prices_from_redis(self, symbols: List[str]) -> Dict[str,float]:
         if not self.redis_params:
             return {}
         r = self.redis
@@ -90,7 +109,7 @@ class TradeAnalysis:
             for symbol in symbols:
                 # Try to get the most recent trade price first
                 trade_key = f"spot:{symbol.lower()}@trade"
-                trade_data = await r.get(trade_key)
+                trade_data = r.get(trade_key)
                 
                 if trade_data:
                     try:
@@ -103,7 +122,7 @@ class TradeAnalysis:
                 
                 # Fallback to bookTicker if trade not available
                 book_key = f"spot:{symbol.lower()}@bookTicker"
-                book_data = await r.get(book_key)
+                book_data = r.get(book_key)
                 
                 if book_data:
                     try:
@@ -118,7 +137,7 @@ class TradeAnalysis:
                 
                 # Final fallback to kline close price
                 kline_key = f"spot:{symbol.lower()}@kline_1m"  # Using 1m interval
-                kline_data = await r.get(kline_key)
+                kline_data = r.get(kline_key)
                 
                 if kline_data:
                     try:
@@ -128,45 +147,106 @@ class TradeAnalysis:
                         pass
                         
         finally:
-            await r.close()
+            r.close()
         
         self.current_prices = prices
         return prices
     def fetch_trade_history_from_postgres(self):
-        pg_url = f"postgresql://{settings.APP_PG_USER}:{settings.APP_PG_PASSWORD}@{settings.APP_PG_HOST}:{settings.APP_PG_PORT}/{settings.APP_PG_DB}"
-        engine = create_engine(pg_url)
-
-        query = "SELECT * FROM futures_order WHERE exec_type = 'TRADE';"
-        df = pd.read_sql(query, engine)
-        df = df.sort_values('timestamp')
-        self.df = df
+        # pg_url = f"postgresql://{settings.APP_PG_USER}:{settings.APP_PG_PASSWORD}@{settings.APP_PG_HOST}:{settings.APP_PG_PORT}/{settings.APP_PG_DB}"
+        # engine = create_engine(pg_url)
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(text("SET search_path TO trading_app"))
+                df = pd.read_sql("""SELECT 
+                                 symbol, order_id, cum_filled_qty, avg_price, realized_pnl, last_price, last_qty, trade_time_ms, exec_type 
+                FROM trading_app.futures_order 
+                WHERE exec_type = 'TRADE';""", conn)
+                numeric_cols = ['cum_filled_qty', 'avg_price', 'realized_pnl', 'last_price', 'last_qty']
+                for col in numeric_cols:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                if 'trade_time_ms' in df.columns:
+                    df['trade_time_ms'] = pd.to_datetime(df['trade_time_ms'], unit='ms', errors='coerce')
+                    df = df.dropna(subset=['trade_time_ms'])
+            
+                # Reset index to ensure clean indexing
+                self.df = df.reset_index(drop=True)
+            
+                logger.info(f"Successfully fetched {len(df)} trades")
+                if not df.empty:
+                    logger.info(f"Latest trade: {df['trade_time_ms'].max()}")
+        except Exception as e:
+            logger.error(f"Error fetching trade history from Postgres: {e}")
+            self.df = pd.DataFrame(columns=['symbol', 'realized_pnl', 'last_price', 'last_qty', 'trade_time_ms'])
     ###realized pnl###
     #calculate avg pnl of trades that are completed 
 
-    def calculate_realized_pnl(self):
-        #Placeholder, change with how df looks later
-        if self.df.empty or 'exec_type' not in self.df.columns:
-            return {'total_realized_pnl': 0, 'assets': {}}
+    def handle_new_trade(self, trade_data: dict):
+        logger.info(f"[handle_new_trade] Processing new trade data...")
+        # Refresh trade history from DB
+        try:
+            self.fetch_trade_history_from_postgres()
+
+            # Update prices (you may optimize this later)
+            self.fetch_current_prices_from_redis([trade_data.get("symbol", settings.SYMBOL)])
+
+        # Recalculate summary
         
-        df = self.df.copy()
-        df = df[df['exec_type'] == 'TRADE']
-        df['realized_pnl'] = pd.to_numeric(df['realized_pnl'])
+            summary = self.get_summary(book_size=100000)
 
-        results = {'assets': {}, 'total_realized_pnl': 0}
+                # Print to console (in addition to logging)
+            print("\n" + "="*50)
+            print("TRADE SUMMARY")
+            print("="*50)
+            print(f"Timestamp: {pd.Timestamp.now()}")
+            print(f"Symbol: {trade_data.get('symbol')}")
+            print(f"Trade ID: {trade_data.get('order_id')}")
+            print("-"*50)
+            
+            # Format the summary nicely
+            print(f"Win/Loss Ratio: {summary['win_loss_ratio']:.2f}")
+            print(f"Realized PnL: {summary['realized_pnl']['total_realized_pnl']:.4f}")
+            if 'BTCUSDT' in summary['realized_pnl']['assets']:
+                print(f"BTCUSDT Realized: {summary['realized_pnl']['assets']['BTCUSDT']['realized_pnl']:.4f}")
+            
+            print(f"Unrealized PnL: {summary['unrealized_pnl']['total_unrealized']:.4f}")
+            print(f"Sharpe Ratio: {summary['sharpe_ratio']:.2f}")
+            print(f"Max Drawdown: {summary['max_drawdown']:.2f}%")
+            print(f"Turnover: {summary['max_turnover']:.2f}x")
+            print(f"Fitness Score: {summary['fitness']:.4f}")
+            print("="*50 + "\n")
+        
+            # Also log the full summary
+            logger.info(f"Trade Summary:\n{json.dumps(summary, indent=4)}")
+        except Exception as e:
+            logger.error(f"[handle_new_trade] Failed to calculate summary: {e}")
 
-        for symbol, group in df.groupby('symbol'):
-            pnl_sum = group['realized_pnl'].sum()
-            results['assets'][symbol] = {'realized_pnl': pnl_sum}
-            results['total_realized_pnl'] += pnl_sum
-
-        return results
+    def calculate_realized_pnl(self):
+        try:
+            if self.df.empty or 'realized_pnl' not in self.df.columns:
+                return {'total_realized_pnl': 0, 'assets': {}}
+            
+            df = self.df.copy()
+            df['realized_pnl'] = pd.to_numeric(df['realized_pnl'], errors='coerce').fillna(0)
+            
+            result = {'assets': {}, 'total_realized_pnl': 0}
+            
+            for symbol, group in df.groupby('symbol'):
+                pnl_sum = group['realized_pnl'].sum()
+                result['assets'][symbol] = {'realized_pnl': pnl_sum}
+                result['total_realized_pnl'] += pnl_sum
+                
+            return result
+        except Exception as e:
+            logger.error(f"Realized PnL error: {str(e)}")
+            return {'total_realized_pnl': 0, 'assets': {}}
 
     
     ###unrealized pnl###
     ##can choose between FIFO or weighted average cost
     ##weighted average cost is better as we are doing HFT, tracking individual lots is impractical
     ###Include different time ranges as well e.g. '1D', '3D', '5D', '1W' to look at trades done in previous day/week etc.
-    async def calculate_unrealized_pnl_from_orders(self, time_range: Optional[str] = None):
+    def calculate_unrealized_pnl_from_orders(self, time_range: Optional[str] = None):
         if self.df.empty or 'exec_type' not in self.df.columns:
             return {'total_unrealized': 0, 'assets': {}}
 
@@ -187,7 +267,7 @@ class TradeAnalysis:
 
         if not self.current_prices:
             symbols = positions['symbol'].tolist()
-            await self.fetch_current_prices_from_redis(symbols)
+            self.fetch_current_prices_from_redis(symbols)
 
         results = {'assets': {}, 'total_unrealized': 0}
         for _, row in positions.iterrows():
@@ -224,15 +304,26 @@ class TradeAnalysis:
 
     #calculate win and losses
     def calculate_win_loss_ratio(self):
-        if 'realized_pnl' not in self.df.columns:
+        try:
+            if self.df.empty or 'realized_pnl' not in self.df.columns:
+                return 0.0
+            
+            # Ensure we have valid data
+            df = self.df.copy()
+            df = df[df['realized_pnl'].notna()]
+            
+            if len(df) == 0:
+                return 0.0
+                
+            wins = len(df[df['realized_pnl'] > 0])
+            losses = len(df[df['realized_pnl'] < 0])
+            
+            if losses == 0:
+                return 100.0 if wins > 0 else 0.0  # Cap at 100:1 ratio
+            return min(wins / losses, 100.0)  # Still cap at 100 even with some losses
+        except Exception as e:
+            logger.error(f"Win/loss ratio error: {str(e)}")
             return 0.0
-
-        self.df['realized_pnl'] = pd.to_numeric(self.df['realized_pnl'])
-        wins =  len(self.df[self.df['realized_pnl'] > 0] )
-        losses = len(self.df[self.df['realized_pnl'] > 0] )
-        if losses == 0:
-            return float('inf') if wins > 0 else 0.0
-        return wins / losses 
 
     #only used for realized pnl
     def calc_sharpe_ratio(self, risk_free_rate =0.0):
@@ -254,7 +345,7 @@ class TradeAnalysis:
     def calc_max_drawdown (self, book_size: float):
 
         cumulative = pd.to_numeric(self.df['realized_pnl']).cumsum()
-        peak = cumulative.expanding(min_period=1).max()
+        peak = cumulative.expanding(min_periods=1).max()
         drawdown = (peak - cumulative) 
         max_drawdown_dollars = drawdown.max()
 
@@ -264,12 +355,22 @@ class TradeAnalysis:
     def calc_turnover (self, book_size: float) : 
         #Need the dollar trading value
         #booksize also a param
-        self.df['last_price'] = pd.to_numeric(self.df['last_price'], errors='coerce')
-        self.df['last_qty'] = pd.to_numeric(self.df['last_qty'], errors='coerce')
-
-        notional_value = (self.df['last_price'] * self.df['last_qty']).sum()
-        turnover = notional_value / book_size
-        return turnover
+        try:
+            if self.df.empty or book_size <= 0:
+                return 0.0
+                
+            if 'last_price' not in self.df.columns or 'last_qty' not in self.df.columns:
+                return 0.0
+                
+            df = self.df.copy()
+            df['last_price'] = pd.to_numeric(df['last_price'], errors='coerce').fillna(0)
+            df['last_qty'] = pd.to_numeric(df['last_qty'], errors='coerce').fillna(0)
+            
+            notional_value = (df['last_price'] * df['last_qty']).sum()
+            return notional_value / book_size
+        except Exception as e:
+            logger.error(f"Turnover calculation error: {str(e)}")
+            return 0.0
 
     def calc_fitness(self, book_size: float):
         sharpe_val = self.calc_sharpe_ratio()
@@ -278,18 +379,38 @@ class TradeAnalysis:
         fit_val = sharpe_val * np.sqrt((abs(ret_val)/(max(turnover_val, 0.125))))
         return fit_val
 
-    async def get_summary(self, book_size: float = 100000):
-        return {
-            "win_loss_ratio": self.calculate_win_loss_ratio(),
-            "realized_pnl": self.calculate_realized_pnl(),
-            "unrealized_pnl": self.calculate_unrealized_pnl_from_orders(),
-            "sharpe_ratio": self.calc_sharpe_ratio(),
-            "max_drawdown": self.calc_max_drawdown(book_size),
-            "max_turnover": self.calc_turnover(book_size),
-            "fitness": self.calc_fitness(book_size)            
-        }
+    def get_summary(self, book_size: float = 100000):
+        summary = {
+        "win_loss_ratio": 0.0,
+        "realized_pnl": {"total_realized_pnl": 0, "assets": {}},
+        "unrealized_pnl": {"total_unrealized": 0, "assets": {}},
+        "sharpe_ratio": 0.0,
+        "max_drawdown": 0.0,
+        "max_turnover": 0.0,
+        "fitness": 0.0
+    }
+        try:
+            summary["win_loss_ratio"] = self.calculate_win_loss_ratio()
+            summary["realized_pnl"] = self.calculate_realized_pnl()
+            summary["unrealized_pnl"] = self.calculate_unrealized_pnl_from_orders()
+            summary["sharpe_ratio"] = self.calc_sharpe_ratio()
+            summary["max_drawdown"] = self.calc_max_drawdown(book_size)
+            summary["max_turnover"] = self.calc_turnover(book_size)
+                
+                # Calculate fitness safely
+            try:
+                ret_val = summary["realized_pnl"].get("total_realized_pnl", 0)
+                turnover = max(summary["max_turnover"], 0.125)
+                summary["fitness"] = summary["sharpe_ratio"] * sqrt(abs(ret_val)/turnover)
+            except:
+                summary["fitness"] = 0.0
+                
+        except Exception as e:
+            logger.error(f"Summary calculation error: {str(e)}")
+        
+        return summary
     
-async def main():
+def main():
 
     # Initialize analyzer
     analyzer = TradeAnalysis()
@@ -298,13 +419,14 @@ async def main():
     
     # Calculate PNL
     try:
-        summary = await analyzer.get_summary(book_size = 100000)
+        summary = analyzer.get_summary(book_size = 100000)
         print(f"Trade Summary: ")
         print(json.dumps(summary, indent=4))
 
     except ValueError as e:
         print(f"Error calculating Trade Summary: {e}")
 if __name__ == "__main__":
+    main()
     # Run the async main function
-    import asyncio
-    asyncio.run(main())
+    # import asyncio
+    # asyncio.run(main())
