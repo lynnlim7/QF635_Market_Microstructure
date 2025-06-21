@@ -51,8 +51,7 @@ class RedisPool :
         else :
             return RedisPublisher.from_pool(self.pool, self._circuit_breaker)
         
-
-    def create_subscriber(self, channels) -> RedisSubscriber :
+    def create_subscriber(self, channels) -> RedisSubscriber:
         return RedisSubscriber.from_pool(self.pool, channels)
 
     @property

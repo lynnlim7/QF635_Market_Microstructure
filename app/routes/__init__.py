@@ -55,3 +55,21 @@ def register_routes(app, binance_api:BinanceApi):
             return jsonify(result)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+
+    @app.post("/create-market-order")
+    def create_market_order():
+        try:
+            data = request.get_json()
+            _side = Side[data["side"].upper()]
+            _quantity = float(data["quantity"])
+            _price = float(data["price"])
+            _tif = data["timeInForce"]
+            result = binance_api.place_market_order(
+                symbol = "BTCUSDT",
+                qty = _quantity,
+                side = _side.name,
+            )
+
+            return jsonify(result)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500

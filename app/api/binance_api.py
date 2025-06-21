@@ -30,6 +30,28 @@ class BinanceApi:
         self._client = Client(self._api_key, self._api_secret, testnet=testnet)
 
     """
+    Place market order for futures trading
+    """
+    def place_market_order(self, symbol: str, side: str, qty: float) -> bool:
+        try:
+            new_qty = round(qty, 3)
+            # new_price = round(, 6)
+            logger.info(f"Trying to place market order in api: {symbol} , side: {side}, qty: {new_qty}")
+            self.check_client_exist()
+
+            # ROUND TO 8 Decimal places:
+
+            order_response = self._client.futures_create_order(symbol=symbol.upper(),
+                                        type=Client.FUTURE_ORDER_TYPE_MARKET,
+                                        side=side,
+                                        quantity=new_qty)
+            logger.info(f"Order submitted: {order_response}")
+            return order_response
+        except Exception as e:
+            logger.error("Failed to place order: {}".format(e))
+            return False
+            
+    """
     Place a limit order for FUTURES trading
     """
     def place_limit_order(self, side: Side, price, quantity, tif='IOC'):
@@ -37,7 +59,7 @@ class BinanceApi:
             self.check_client_exist()
             order_response = self._client.futures_create_order(symbol=self._symbol.upper(),
                                               side=side.name,
-                                              type=Client.ORDER_TYPE_LIMIT,
+                                              type=Client.FUTURE_ORDER_TYPE_LIMIT,
                                               price=price,
                                               quantity=quantity,
                                               timeInForce=tif)
@@ -51,21 +73,83 @@ class BinanceApi:
             }
             return res
 
-    """
-    order_id: its the client_order_id from the order creation: x-Cb7ytekJff39894ef6683781a05ad8
-    """
-    def cancel_order(self, order_id) -> bool:
-        try:
+    def place_stop_loss(self, side: Side, quantity: float, price: float) -> bool:
+        try: 
             self.check_client_exist()
-            order_response = self._client.futures_cancel_order(symbol=self._symbol.upper(), origClientOrderId=order_id)
+            order_response = self._client.futures_create_order(
+                                              symbol=self._symbol.upper(),
+                                              side=Client.SIDE_SELL,
+                                              type=Client.FUTURE_ORDER_TYPE_STOP_MARKET,
+                                              stopPrice=price,
+                                              closePosition=True,
+                                              quantity=quantity,
+                                              timeInForce='GTC')
+            logger.info(f"Stop loss order placed: {order_response}")
             return order_response
         except Exception as e:
-            api_logger.warning("Failed to cancel order: {}, {}".format(order_id, e))
+            api_logger.warning("Failed to create stop loss order: {}".format(e))
+            return False
+        
+    def place_take_profit(self, side: Side, quantity: float, price: float) -> bool:
+        try:
+            self.check_client_exist()
+            order_response = self._client.futures_create_order(
+                                              symbol=self._symbol.upper(),
+                                              side=Client.SIDE_SELL,
+                                              type=Client.FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
+                                              stopPrice=price,
+                                              closePosition=True,
+                                              quantity=quantity,
+                                              timeInForce='GTC')
+            logger.info(f"Take profit order placed: {order_response}")
+            return order_response
+        except Exception as e:
+            api_logger.warning("Failed to create take profit order: {}".format(e))
+            return False
+            
+    def cancel_order(self, symbol:str, order_id: int) -> bool:
+        try:
+            self.check_client_exist()
+            order_response = self._client.futures_cancel_order(
+                                            symbol=symbol.upper(),
+                                            orderId=order_id)
+            logger.info(f"Order cancelled: {order_response}")
+            return order_response
+        except Exception as e:
+            api_logger.warning("Failed to cancel order: {}, {}".format(e))
+            return False
+        
+    def cancel_open_orders(self, symbol: str) -> bool:
+        try:
+            self.check_client_exist()
+            order_response = self._client.futures_cancel_all_open_orders(symbol=symbol.upper())
+            return order_response
+        except Exception as e:
+            api_logger.warning("Failed to cancel all open orders: {}".format(e))
             return False
 
     def check_client_exist(self):
         if self._client is None:
+            logger.info("Trying to instantiate client now")
             self._client = Client(self._api_key, self._api_secret, testnet=True)
+
+    def get_account_balance(self) -> dict:
+        try:
+            self.check_client_exist()
+            return self._client.futures_account_balance()
+        except Exception as e:
+            error_msg = f"Failed to retrieve account balance: {e}"
+            api_logger.warning(error_msg)
+            return {"errorMsg": error_msg}
+        
+    def get_open_orders(self, symbol: str) -> list:
+        try:
+            self.check_client_exist()
+            return self._client.futures_get_open_orders(symbol=symbol.upper())
+        except Exception as e:
+            error_msg = f"Failed to retrieve open orders: {e}"
+            api_logger.warning(error_msg)
+            return {"errorMsg": error_msg}
 
     """
     Get current open positions.
@@ -113,6 +197,7 @@ class BinanceApi:
     def get_close_prices_df(self, symbol="BTCUSDT", interval=Client.KLINE_INTERVAL_1MINUTE, limit=200):
         df = self.get_ohlcv(symbol, interval, limit)
         return df[['timestamp', 'close']]
+    
 
             
             

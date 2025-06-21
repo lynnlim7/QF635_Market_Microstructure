@@ -10,6 +10,7 @@ class PortfolioManager:
         self.unrealized_pnl = {} # {symbol (upper Case): float } e.g. {"BTCUSDT":3.4,"ETHUSDT":-1.3}
         self.last_market_price = {} # {symbol (upper Case): {"best_bid": float, "best_ask":float} }
         self.total_commissions = 0.0
+        self.cash = 0.0 # placeholder
 
         self.open_orders = [] # to be determined
         self.trade_history: list[OrderEventUpdate] = []
@@ -129,7 +130,7 @@ class PortfolioManager:
             return
 
         if current_positions['qty'] == 0:
-            self.unrealized_pnl = 0
+            self.unrealized_pnl[symbol] = 0
             return
 
         if current_positions['qty'] > 0:
@@ -144,10 +145,14 @@ class PortfolioManager:
         return
 
 
-
     # State Accessors
     def get_unrealised_pnl(self):
-        return self.get_realized_pnl()
+        return sum(self.unrealized_pnl.values())
+
+    def get_total_pnl(self) -> float:
+        unrealized_pnl = 0.0
+        unrealized_total = sum(self.unrealized_pnl.values()) 
+        return self.realized_pnl + unrealized_total
 
     def get_portfolio_stats_by_symbol(self, symbol: str):
         if not symbol:
@@ -158,7 +163,8 @@ class PortfolioManager:
             'last_market_price': self.last_market_price.get(symbol.upper()),
             'realized_pnl': self.realized_pnl,
             'total_commissions': self.total_commissions,
-            'total_pnl': self.total_pnl
+            'total_pnl': self.get_total_pnl(),
+            'cash_balance': self.cash
         }
 
     def get_positions(self):
@@ -166,19 +172,6 @@ class PortfolioManager:
 
     def get_realized_pnl(self):
         return self.realized_pnl
-
-    def get_unrealized_pnl(self, current_prices: dict):
-        pnl = 0.0
-        for sym, pos in self.positions.items():
-            if sym in current_prices:
-                market_price = current_prices[sym]
-                pnl += (market_price - pos["entry_price"]) * pos["qty"]
-        return pnl
-
-    def get_total_portfolio_value(self, current_prices: dict):
-        return self.cash + self.get_unrealized_pnl(current_prices)
-
-
 
 if __name__=="__main__" :
     symbol = 'BTCUSDT'

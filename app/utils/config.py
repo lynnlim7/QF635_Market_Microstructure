@@ -42,22 +42,19 @@ class Settings(BaseSettings):
     MAX_ABSOLUTE_DRAWDOWN: float = 0.10 # 10% equity
     MAX_RELATIVE_DRAWDOWN: float = 0.05 # 5% daily
     MAX_SPREAD_PCT: float = 0.003
+    MAX_EXPOSURE_PCT: float = 0.05 # 5%
 
     # Scoring Parameters
     SIGNAL_SCORE_BUY: float = 1.0
     SIGNAL_SCORE_SELL: float = -1.0
     SIGNAL_SCORE_HOLD: float  = 0
 
-    # Kill Switch
-    ACTIVATE_KILL_SWITCH: bool = False
-
     #PG config
     APP_PG_HOST: str = os.getenv("APP_PG_HOST", "")
     APP_PG_USER: str = os.getenv("APP_PG_USER", "")
     APP_PG_PASSWORD: str = os.getenv("APP_PG_PASSWORD", "")
     APP_PG_PORT: str = os.getenv("APP_PG_PORT", "5432")
-    APP_PG_DB:str = os.getenv("APP_PG_DB", "postgres")
-
+    APP_PG_DB:str = os.getenv("APP_PG_DB", "localhost")
 
 
 
