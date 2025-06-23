@@ -1,19 +1,22 @@
 # from binance import SIDE_BUY, ORDER_TYPE_LIMIT, TIME_IN_FORCE_GTC
 import threading
 import time
-import asyncio
 
 from flask import Flask
 
+from app.analytics.TradeAnalysis import TradeAnalysis
+from app.api.base_api import BaseApi
+from app.api.base_gateway import BaseGateway
 from app.api.binance_api import BinanceApi
 from app.api.binance_gateway import BinanceGateway
+from app.api.mock.mock_binance_api import MockBinanceApi
+from app.api.mock.mock_binance_gateway import MockBinanceGateway
 from app.order_management.order_manager import OrderManager
 from app.portfolio.portfolio_manager import PortfolioManager
-from app.analytics.TradeAnalysis import run_trade_analysis, get_trade_summary
+from app.queue_manager.locking_queue import LockingQueue
 from app.risk.risk_manager import RiskManager
 from app.routes import register_routes
 from app.services import RedisPool
-from app.services.circuit_breaker import RedisCircuitBreaker
 from app.strategy.base_strategy import BaseStrategy
 from app.strategy.macd_strategy import MACDStrategy
 from app.queue_manager.locking_queue import LockingQueue
@@ -21,7 +24,6 @@ from app.strategy.random_strategy import RandomStrategy
 from app.utils.config import settings
 from app.utils.func import get_execution_channel, get_orderbook_channel, get_candlestick_channel
 from app.utils.logger import main_logger as logger
-
 
 symbol = settings.SYMBOL
 
@@ -33,14 +35,19 @@ redis_channels = [
     # add in other channels 
     ]
 
-gateway_instance: BinanceGateway | None = None
+gateway_instance: BaseGateway | None = None
 strategy_instance: BaseStrategy | None = None
-binance_api = BinanceApi(settings.SYMBOL)
 
 redis_pool = RedisPool()
 
 circuit_breaker = redis_pool.create_circuit_breaker()
 publisher = redis_pool.create_publisher()
+
+if settings.IS_SIMULATION:
+    binance_api = MockBinanceApi(symbol=settings.SYMBOL, redis_publisher=publisher)
+else:
+    binance_api = BinanceApi(settings.SYMBOL)
+
 portfolio_manager = PortfolioManager()
 risk_manager = RiskManager(
     symbol=symbol,
@@ -68,29 +75,34 @@ emergency_shutdown_triggered = False
 def emergency_shutdown_callback(reason: str):
     global emergency_shutdown_triggered
     logger.critical(f"Emergency shutdown callback triggered: {reason}")
-    
+
     if not emergency_shutdown_triggered:
         emergency_shutdown_triggered = True
-        
+
         # Trigger emergency liquidation in risk manager
         if 'risk_manager' in globals():
             try:
                 risk_manager.emergency_liquidation()
             except Exception as e:
                 logger.error(f"Error during emergency liquidation: {e}")
-        
+
         logger.critical("All trading activity stopped and positions liquidated.")
 
 def start_binance() -> None:
     logger.info("Starting binance now")
     global gateway_instance
-    gateway_instance = BinanceGateway(symbol=symbol, redis_publisher=publisher)
+    if settings.IS_SIMULATION:
+        # todo: may need symbol
+        gateway_instance = MockBinanceGateway(symbol=symbol, redis_publisher=publisher)
+    else:
+        gateway_instance = BinanceGateway(symbol=symbol, redis_publisher=publisher)
     gateway_instance.connection()
 
 def handle_order_book_quote(data: dict):
-    logger.info(f"Receiving order book quote from redis!!: {data}")
-    portfolio_manager.on_new_price(data)
-    risk_manager.on_new_orderbook(data)
+    # logger.info(f"Receiving order book quote from redis!!: {data}")
+    # portfolio_manager.on_new_price(data)
+    # risk_manager.on_new_orderbook(data)
+    pass
 
 def handle_execution_updates(data: dict):
     order_queue.push(data)
@@ -100,7 +112,7 @@ def start_subscriber():
     ## subscribe to redis channel
     subscriber = redis_pool.create_subscriber(redis_channels)
     logger.info(f"Created Redis subscriber for channels: {redis_channels}")
-    
+
     # register handler for diff modules
     global strategy_instance
     while strategy_instance is None:
@@ -126,8 +138,11 @@ def start_subscriber():
             subscriber.register_handler(channel, handle_order_book_quote)
             subscriber.register_handler(channel, portfolio_manager.on_new_price)
             subscriber.register_handler(channel, risk_manager.on_new_orderbook)
+            if settings.IS_SIMULATION:
+                subscriber.register_handler(channel, binance_api.on_new_price)
+
             logger.info(f"Registered orderbook handlers for {channel}")
-    
+
     logger.info("Starting Redis subscriber...")
     subscriber.start_subscribing()
     logger.info("Redis subscriber started")
@@ -142,36 +157,41 @@ def signal_callback(signal: int):
     signal_queue.push(signal)
 
 def signal_consumer_loop():
+    sleep_time = 0.001 if settings.IS_SIMULATION else 1
+
     while True:
         if emergency_shutdown_triggered:
             logger.critical("Emergency shutdown: Signal consumer loop stopped.")
             break
-            
+
         if not signal_queue.is_empty():
             signal = signal_queue.pop()
             if signal is not None:
                 # signal is actually a pair value
                 risk_manager.on_signal_update(signal[1], symbol)
-        time.sleep(0.1)
+        time.sleep(sleep_time)
+
 
 def order_consumer_loop():
+    sleep_time = 0.001 if settings.IS_SIMULATION else 1
+
     while True:
         if emergency_shutdown_triggered:
             logger.critical("Emergency shutdown: Order consumer loop stopped.")
             break
-            
+
         if not order_queue.is_empty() and order_manager:
             data = order_queue.pop()
             if data[1] is not None:
                 order_manager.save_execution_updates(data[1])
-        time.sleep(0.1)
+        time.sleep(sleep_time)
 
 def background_drawdown_check():
     while True:
         if emergency_shutdown_triggered:
             logger.critical("Emergency shutdown: Background drawdown check stopped")
             break
-            
+
         try:
             logger.info("Checking drawdown limits...")
             if not risk_manager.drawdown_limit_check(symbol):
@@ -186,101 +206,27 @@ def background_drawdown_check():
 
 
 def main():
-    logger.info(f"Start trading..")
+    logger.info(f"Start trading.. is_simulation: {settings.IS_SIMULATION}")
 
     circuit_breaker = redis_pool.create_circuit_breaker()
     circuit_breaker.set_emergency_callback(emergency_shutdown_callback)
     logger.info("Emergency shutdown callback registered with circuit breaker")
-    
+
     global strategy_instance
 
-    strategy_instance = RandomStrategy(symbol)
-    # strategy_instance = MACDStrategy(symbol)
+    # strategy_instance = RandomStrategy(symbol)
+    strategy_instance = MACDStrategy(symbol)
     strategy_instance.register_callback(signal_callback)
     logger.info("Strategy instance created and callback registered")
+
 
     while True:
         if emergency_shutdown_triggered:
             logger.critical("Stopping all trading activity")
             break
-            
+
         time.sleep(60)
 
-    # currently no need to run this:
-    # # TODO: figure out how to integrate circuit_breaker
-    # while True:
-    #     try:
-    #         if not circuit_breaker.allow_request():
-    #             logger.warning(f"Circuit breaker is open. Stop trading.")
-    #             time.sleep(5)
-    #             continue
-    #
-    #         current_prices = {}
-    #
-    #         orderbook_data = risk_manager.df_orderbook.get(symbol)
-    #         price_data = risk_manager.df_candlestick.get(symbol)
-    #
-    #         if orderbook_data is not None and len(orderbook_data) > 0:
-    #             current_price = orderbook_data['mid_price'].iloc[-1]
-    #             current_prices[symbol] = current_price
-    #             logger.info(f"Current mid price for {symbol}: {current_price:.4f}")
-    #
-    #             atr = risk_manager.calculate_atr()
-    #             position_size = risk_manager.calculate_position_size()
-    #
-    #             if atr is not None:
-    #                 logger.info(f"Average True Range: {atr:.4f}")
-    #             if position_size is not None:
-    #                 logger.info(f"Position Size: {position_size:.4f}")
-    #
-    #             drawdown_limit_check = risk_manager.calculate_drawdown_limits(symbol, current_prices)
-    #             if drawdown_limit_check == False:
-    #                 logger.warning("Drawdown limits breached. Opening circuit breaker.")
-    #                 circuit_breaker.force_open("Drawdown limits breached.")
-    #                 continue
-    #
-    #             portfolio_stats = risk_manager.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-    #             position = portfolio_stats['position']
-    #
-    #             if position is None or position['qty'] == 0:
-    #                 if not signal_queue.is_empty():
-    #                     signal = signal_queue.pop()
-    #                     if signal is not None:
-    #                         direction = risk_manager.accept_signal(signal, symbol)
-    #                         logger.info(f"Signal {signal} accepted with direction: {direction}")
-    #                         if direction:
-    #                             entry_signal = risk_manager.entry_position(symbol, direction)
-    #                             if entry_signal is not None:
-    #                                 stop_loss, take_profit = entry_signal
-    #                                 logger.info(f"Entry signal received - Stop Loss: {stop_loss:.4f}, Take Profit: {take_profit:.4f}")
-    #                             else:
-    #                                 logger.warning(f"Entry position returned None for direction {direction}")
-    #                         else:
-    #                             logger.info("No valid signal direction received")
-    #             else:
-    #                 logger.info(f"Position already exists for {symbol}, managing position")
-    #                 # risk_manager.manage_position(symbol, atr_multiplier=1.0)
-    #         else:
-    #             logger.info("Waiting for market data..")
-    #             time.sleep(5)
-    #
-    #     except Exception as e:
-    #         logger.error(f"Error in main workflow: {e}", exc_info=True)
-    #         time.sleep(5)  # Add delay after error to prevent rapid retries
-    #
-        # strategy.update_data(last_candle=price_data)
-        # signal = strategy.generate_signal(price_data)
-
-
-        # TODO : change to logger, or can even log it in the strategy
-        # print(f"Signal: {signal}")
-        # strategy.print_state()
-
-        # I think this depends on the risk appetite of portfolio
-        # amount = portfolio.calculate_position_size(signal, price_data)
-        # portfolio.execute_trade(signal, amount, price_data)
-
-        # time.sleep(60)
 
 if __name__ == "__main__":
     threading.Thread(target=start_flask, daemon=True).start()

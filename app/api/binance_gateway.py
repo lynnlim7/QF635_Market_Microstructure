@@ -16,6 +16,7 @@ import websockets.exceptions
 from binance import AsyncClient, BinanceSocketManager, Client
 from binance.ws.depthcache import FuturesDepthCacheManager
 
+from app.api.base_gateway import BaseGateway
 from app.common.interface_book import VenueOrderBook, PriceLevel, OrderBook
 from app.common.interface_order import OrderEvent
 from app.common.order_event_update import OrderEventUpdate
@@ -51,7 +52,7 @@ execution_logger = setup_logger(
 """
 Gateway for websocket connections
 """
-class BinanceGateway:
+class BinanceGateway(BaseGateway):
     def __init__(self, symbol:str, api_key=None, api_secret=None, name:str = "", testnet=True, redis_publisher=None):
         os.makedirs("./logs/market", exist_ok=True)
         os.makedirs("./logs/orders", exist_ok=True)

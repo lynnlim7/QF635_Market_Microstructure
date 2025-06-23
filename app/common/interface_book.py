@@ -9,7 +9,7 @@ class PriceLevel:
         return '[' + str(self.price) + " | " + str(self.size) + ']'
 
     def to_dict(self):
-        return {"price": self.price, "quantity": self.size}
+        return {"price": self.price, "quantity": self.size, "quote_id": self.quote_id}
 
 # An order book with bid and ask sides
 class OrderBook:
