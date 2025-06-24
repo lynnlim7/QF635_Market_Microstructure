@@ -75,27 +75,31 @@ class TradeAnalysis:
     #initialize the params
     def __init__(self, 
                  redis_params: Optional[Dict[str, Any]] = None,
-                current_prices: Optional[Dict[str, float]]= None):
-
-        self.current_prices = current_prices or {}
+                current_prices: Optional[Dict[str, float]]= None, use_db= True):
         self.redis_params = redis_params or {
             "host": settings.REDIS_HOST,
             "port": 6379,
             "db": 0,
             "decode_responses": False
         }
-        self.redis_pool = RedisPool(
+        if use_db:
+            self.redis_pool = RedisPool(
         host=self.redis_params.get("host", "localhost"),
             port=self.redis_params.get("port", 6379),
             db=self.redis_params.get("db", 0),
             decode_responses=self.redis_params.get("decode_responses", False)  # Important: TradeAnalysis uses `redis.asyncio`
 )
-        self.redis = redis.Redis(connection_pool=self.redis_pool.pool)
-        self.df = pd.DataFrame()
-        self.engine = create_engine(
+            self.engine = create_engine(
             f"postgresql://{settings.APP_PG_USER}:{settings.APP_PG_PASSWORD}@{settings.APP_PG_HOST}:{settings.APP_PG_PORT}/{settings.APP_PG_DB}"
         )
+        else:
+            self.engine = None
+        self.redis = redis.Redis(connection_pool=self.redis_pool.pool)
+        self.current_prices = current_prices or {}
 
+        
+        self.df = pd.DataFrame()
+        
         #convert timestamps
         if 'timestamp' in self.df.columns:
             self.df = self.df.sort_values('timestamp')
@@ -364,8 +368,26 @@ class TradeAnalysis:
         turnover_val = self.calc_turnover(book_size)
         fit_val = sharpe_val * np.sqrt((abs(ret_val)/(max(turnover_val, 0.125))))
         return fit_val
+    
+    #additional function to load trades from separate source if required
+    def load_trades_from_json(self, trades: List[Dict]):
+        df = pd.DataFrame(trades)
+        if 'trade_time_ms' in df.columns:
+            df['trade_time_ms'] = pd.to_datetime(df['trade_time_ms'], unit='ms', errors='coerce')
+            df = df.dropna(subset=['trade_time_ms'])
+        self.df = df.reset_index(drop=True)
 
-    def get_summary(self, book_size: float = 100000):
+    #setting prices from best bid/ask
+    def set_prices_from_best_bid_ask(self, best_bid_ask: Dict[str, Dict[str, float]]):
+        self.current_prices = {}
+        for symbol, prices in best_bid_ask.items():
+            bid = prices.get("bid", 0)
+            ask = prices.get("ask", 0)
+            if bid > 0 and ask > 0:
+                self.current_prices[symbol] = (bid + ask) / 2
+
+    def get_summary(self, book_size: float = 100000, 
+                    trades_json: Optional[List[Dict]] = None, best_bid_ask: Optional[Dict[str, Dict[str, float]]] = None):
         summary = {
         "win_loss_ratio": 0.0,
         "realized_pnl": {"total_realized_pnl": 0, "assets": {}},
@@ -376,6 +398,14 @@ class TradeAnalysis:
         "fitness": 0.0
         }
         try:
+            #load trades if they are provided
+            if trades_json:
+                self.load_trades_from_json(trades_json)
+
+            #fetch current prices if not already set
+            if best_bid_ask:
+                self.set_prices_from_best_bid_ask(best_bid_ask)
+
             print(self.df.head(5))
             summary["win_loss_ratio"] = self.calculate_win_loss_ratio()
             summary["realized_pnl"] = self.calculate_realized_pnl()

@@ -234,6 +234,10 @@ if __name__ == "__main__":
     threading.Thread(target=start_subscriber, daemon=True).start()
     threading.Thread(target=signal_consumer_loop, daemon=True).start()
     threading.Thread(target=order_consumer_loop, daemon=True).start()
+<<<<<<< Updated upstream
     # threading.Thread(target=lambda: asyncio.run(run_trade_analysis()), daemon=True).start()
     threading.Thread(target=background_drawdown_check, daemon=True).start()
+=======
+    threading.Thread(target=run_trade_analysis, daemon=True).start()
+>>>>>>> Stashed changes
     main()

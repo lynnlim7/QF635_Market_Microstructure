@@ -12,6 +12,8 @@ COPY app/ app/
 COPY db/ db/
 COPY models/ models/
 
+# RUN echo "Listing /main/db" && ls -l /main/db
+
 EXPOSE 8080
 
 ENV PYTHONPATH=/main

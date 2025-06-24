@@ -34,7 +34,11 @@ services:
   db-migrator:
     build:
       context: .
+<<<<<<< Updated upstream
     command: ["bash","./db/migrate.sh"]
+=======
+    command: ["bash", "./db/migrate.sh"]
+>>>>>>> Stashed changes
     depends_on:
       postgres:
         condition: service_healthy
