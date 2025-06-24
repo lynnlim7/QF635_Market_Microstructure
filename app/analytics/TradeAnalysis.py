@@ -58,12 +58,12 @@ def listen_for_trades():
             logger.error(f"Subscription error: {e}, reconnecting...")
             time.sleep(5) 
 
-# This function returns the summary
-def get_trade_summary():
-    pool = get_postgres_pool()
-    analysis = TradeAnalysis(db_pool=pool)
-    summary = analysis.get_summary()
-    return summary
+# # This function returns the summary
+# def get_trade_summary():
+#     pool = get_postgres_pool()
+#     analysis = TradeAnalysis(db_pool=pool)
+#     summary = analysis.get_summary()
+#     return summary
 
 # Main callable function from main.py
 def run_trade_analysis():
@@ -191,30 +191,15 @@ class TradeAnalysis:
             self.fetch_current_prices_from_redis([trade_data.get("symbol", settings.SYMBOL)])
 
         # Recalculate summary
-        
-            summary = self.get_summary(book_size=100000)
-
-                # Print to console (in addition to logging)
-            print("\n" + "="*50)
+            print("\n" + "=" * 50)
             print("TRADE SUMMARY")
-            print("="*50)
+            print("=" * 50)
             print(f"Timestamp: {pd.Timestamp.now()}")
             print(f"Symbol: {trade_data.get('symbol')}")
             print(f"Trade ID: {trade_data.get('order_id')}")
-            print("-"*50)
-            
-            # Format the summary nicely
-            print(f"Win/Loss Ratio: {summary['win_loss_ratio']:.2f}")
-            print(f"Realized PnL: {summary['realized_pnl']['total_realized_pnl']:.4f}")
-            if 'BTCUSDT' in summary['realized_pnl']['assets']:
-                print(f"BTCUSDT Realized: {summary['realized_pnl']['assets']['BTCUSDT']['realized_pnl']:.4f}")
-            
-            print(f"Unrealized PnL: {summary['unrealized_pnl']['total_unrealized']:.4f}")
-            print(f"Sharpe Ratio: {summary['sharpe_ratio']:.2f}")
-            print(f"Max Drawdown: {summary['max_drawdown']:.2f}%")
-            print(f"Turnover: {summary['max_turnover']:.2f}x")
-            print(f"Fitness Score: {summary['fitness']:.4f}")
-            print("="*50 + "\n")
+            summary = self.get_summary(book_size=100000)
+
+
         
             # Also log the full summary
             logger.info(f"Trade Summary:\n{json.dumps(summary, indent=4)}")
@@ -290,6 +275,7 @@ class TradeAnalysis:
             results['total_unrealized'] += unrealized
 
         return results
+
     def start_price_listener(self, symbols: List[str]):
         def update_price_callback(data: dict):
             symbol = data.get("s")
@@ -388,8 +374,9 @@ class TradeAnalysis:
         "max_drawdown": 0.0,
         "max_turnover": 0.0,
         "fitness": 0.0
-    }
+        }
         try:
+            print(self.df.head(5))
             summary["win_loss_ratio"] = self.calculate_win_loss_ratio()
             summary["realized_pnl"] = self.calculate_realized_pnl()
             summary["unrealized_pnl"] = self.calculate_unrealized_pnl_from_orders()
@@ -404,7 +391,26 @@ class TradeAnalysis:
                 summary["fitness"] = summary["sharpe_ratio"] * sqrt(abs(ret_val)/turnover)
             except:
                 summary["fitness"] = 0.0
-                
+
+                # Print to console (in addition to logging)
+
+
+            print("-" * 50)
+            print("Current Analytics")
+            print("-" * 50)
+            print(f"Win/Loss Ratio: {summary['win_loss_ratio']:.2f}")
+            print(f"Realized PnL: {summary['realized_pnl']['total_realized_pnl']:.4f}")
+            if 'BTCUSDT' in summary['realized_pnl']['assets']:
+                print(f"BTCUSDT Realized: {summary['realized_pnl']['assets']['BTCUSDT']['realized_pnl']:.4f}")
+
+            print(f"Unrealized PnL: {summary['unrealized_pnl']['total_unrealized']:.4f}")
+            print(f"Sharpe Ratio: {summary['sharpe_ratio']:.2f}")
+            print(f"Max Drawdown: {summary['max_drawdown']:.2f}%")
+            print(f"Turnover: {summary['max_turnover']:.2f}x")
+            print(f"Fitness Score: {summary['fitness']:.4f}")
+            print("=" * 50 + "\n")
+
+
         except Exception as e:
             logger.error(f"Summary calculation error: {str(e)}")
         

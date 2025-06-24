@@ -61,7 +61,12 @@ class MACDStrategy(BaseStrategy):
         self.data = self.api.get_close_prices_df(symbol=self.symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=200)
 
         if self.data is None or len(self.data) == 0:
-            raise RuntimeError("Unable to get data")
+            macd_logger.warning("No initial data loaded. Will wait for incoming candles to build indicators.")
+            # Initialize empty dataframe with expected columns so update_data works
+            self.data = pd.DataFrame(columns=['timestamp', 'close', 'EMA_FAST', 'EMA_SLOW', 'MACD', 'Signal_Line'])
+            return  # Don't compute signals yet
+
+        self.data = self.data.copy()
 
         # Calculate MACD and Signal Line for the initial data
         self.data['EMA_FAST'] = self.data['close'].ewm(span=self.config['fast_period'], adjust=False).mean()
@@ -85,10 +90,11 @@ class MACDStrategy(BaseStrategy):
         if not last_candle['is_closed']:
             return
 
-        previous_data = self.data.iloc[-1]
-        if previous_data['timestamp'] == last_candle['start_time']:
-            macd_logger.info('[updateData] already added, will not add')
-            return
+        if len(self.data) > 0:
+            previous_data = self.data.iloc[-1]
+            if previous_data['timestamp'] == last_candle['start_time']:
+                macd_logger.info('[updateData] already added, will not add')
+                return
 
         new_data = pd.DataFrame({'timestamp': [last_candle['start_time']], 'close': [last_candle['close']]})
         self.data = pd.concat([self.data, new_data], ignore_index=True)

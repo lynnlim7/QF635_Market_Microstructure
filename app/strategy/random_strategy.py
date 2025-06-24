@@ -77,11 +77,11 @@ class RandomStrategy(BaseStrategy):
         - Sell when MACD crosses below the Signal Line
         """
         curr = random.choice([1,-1])
-        if curr == 1 and self.last_action != "BUY":
+        if curr == 1:
             self.last_action = "BUY"
             return settings.SIGNAL_SCORE_BUY
 
-        elif curr == -1 and self.last_action != "SELL":
+        elif curr == -1:
             self.last_action = "SELL"
             return settings.SIGNAL_SCORE_SELL
 

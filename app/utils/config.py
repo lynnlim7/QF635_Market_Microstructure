@@ -55,7 +55,8 @@ class Settings(BaseSettings):
     APP_PG_PASSWORD: str = os.getenv("APP_PG_PASSWORD", "")
     APP_PG_PORT: str = os.getenv("APP_PG_PORT", "5432")
     APP_PG_DB:str = os.getenv("APP_PG_DB", "localhost")
-
+    # simulation
+    IS_SIMULATION: bool = False
 
 
 settings = Settings()

@@ -7,6 +7,7 @@
 import pandas as pd
 from binance import Client
 
+from app.api.base_api import BaseApi
 from app.common.interface_order import Side
 from app.utils.config import settings
 from app.utils.logger import setup_logger, main_logger as logger
@@ -18,7 +19,7 @@ api_logger = setup_logger(
             enable_console=False
             )
 
-class BinanceApi:
+class BinanceApi(BaseApi):
     def __init__(self, symbol:str, api_key=None, api_secret=None, name:str = "", testnet=True):
         self._api_key = api_key or settings.BINANCE_TEST_API_KEY
         self._api_secret = api_secret or settings.BINANCE_TEST_API_SECRET
@@ -32,7 +33,7 @@ class BinanceApi:
     """
     Place market order for futures trading
     """
-    def place_market_order(self, symbol: str, side: str, qty: float) -> bool:
+    def place_market_order(self, symbol: str, side: str, qty: float):
         try:
             new_qty = round(qty, 3)
             # new_price = round(, 6)
@@ -49,7 +50,11 @@ class BinanceApi:
             return order_response
         except Exception as e:
             logger.error("Failed to place order: {}".format(e))
-            return False
+            res = {
+                "status": "FAILED",
+                "errorMsg": str(e),
+            }
+            return res
             
     """
     Place a limit order for FUTURES trading
