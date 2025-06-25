@@ -63,7 +63,7 @@ order_manager = OrderManager(
 
 
 app = Flask(__name__)
-register_routes(app, binance_api)
+register_routes(app, binance_api, portfolio_manager)
 
 # Create global signal queue_manager
 signal_queue = LockingQueue()

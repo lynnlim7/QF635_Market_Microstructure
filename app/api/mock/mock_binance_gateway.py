@@ -17,10 +17,14 @@ Mock Gateway
 
 # config
 
-SIMULATION_TIME_IN_MINUTES = 30
+SIMULATION_TIME_IN_MINUTES = 60
 # if u want to cut data into half -> put 1/2
 DATA_RATIO = 1
 
+# CANDLESTICK_FILE_NAME = "BTCUSDT-1m-2024-03-16.csv"
+CANDLESTICK_FILE_NAME = "BTCUSDT-1m-2024-03-30.csv"
+# ORDERBOOK_FILE_NAME = "BTCUSDT_240329-bookTicker-2024-03-16.csv"
+ORDERBOOK_FILE_NAME = "BTCUSDT_240329-bookTicker-2024-03-30.csv"
 
 
 class MockBinanceGateway(BaseGateway):
@@ -36,6 +40,7 @@ class MockBinanceGateway(BaseGateway):
 
         self.orderbook = pd.DataFrame()
         self.orderbook_list: list[dict] = []
+        self.candlestick_list: list[dict] = []
         self.candlestick: pd.DataFrame = pd.DataFrame()
         self.candlestick_time_ratio = 1
 
@@ -61,11 +66,17 @@ class MockBinanceGateway(BaseGateway):
 
 
         logger.info("Loading mock candlestick data")
-        self.candlestick = pd.read_csv(f"{self.base_dir}/data/BTCUSDT-1m-2024-03-30.csv")
+        self.candlestick = pd.read_csv(f"{self.base_dir}/data/{CANDLESTICK_FILE_NAME}")
 
-        sliced = len(self.candlestick) // (1 / DATA_RATIO)
+        sliced = len(self.candlestick) // int((1 / DATA_RATIO))
+        print("sliced")
         self.candlestick = self.candlestick.iloc[:sliced].copy()
         self.candlestick['time_elapsed_ms'] =  self.candlestick['open_time'].shift(-1) -  self.candlestick['open_time']
+
+        # presave the list first
+        for index, row in self.candlestick.iterrows():
+            self.candlestick_list.append(self.to_candlestick(row))
+
 
         first_row =  self.candlestick.iloc[0]
         last_row =  self.candlestick.iloc[-1]
@@ -81,10 +92,20 @@ class MockBinanceGateway(BaseGateway):
 
         logger.info("Loading mock orderbook data")
 
-        self.orderbook = pd.read_csv(f"{self.base_dir}/data/BTCUSDT_240927-bookTicker-2024-03-30.csv")
-        self.orderbook =  self.orderbook[ self.orderbook['event_time'] < last_row_timing]
+        orderbook_df =  pd.read_csv(f"{self.base_dir}/data/{ORDERBOOK_FILE_NAME}")
+        # Resample best_bid / best_ask every 1s
+        orderbook_df['transaction_time'] = pd.to_datetime(orderbook_df['transaction_time'], unit='ms')
+        resampled_df = (
+            orderbook_df.set_index('transaction_time')
+            .resample('10s')
+            .agg({'best_bid_price': 'last', 'best_bid_qty': 'last', 'best_ask_price': 'last', 'best_ask_qty': 'last',
+                  'update_id': 'last', 'event_time': 'last'})
+            .dropna()
+            .reset_index()
+        )
 
 
+        self.orderbook = resampled_df[resampled_df['event_time'] < last_row_timing]
 
         # TODO: not good design, create object then throw away, fix this
         for index, row in self.orderbook.iterrows():
@@ -104,10 +125,15 @@ class MockBinanceGateway(BaseGateway):
             )
             self.orderbook_list.append(orderbook_obj.to_dict())
 
-        self.orderbook['time_elapsed_ms'] = self.orderbook['transaction_time'].shift(-1) - self.orderbook['transaction_time']
+        self.orderbook['time_elapsed_ms'] = (
+            resampled_df['transaction_time'].shift(-1) - resampled_df['transaction_time']
+        ).dt.total_seconds() * 1000
+
         ob_first_row = self.orderbook.iloc[0]
         ob_last_row = self.orderbook.iloc[-1]
-        ob_total_time_elapsed_ms = ob_last_row['transaction_time'] - ob_first_row['transaction_time']
+        ob_total_time_elapsed_ms = (
+           ob_last_row['transaction_time'] - ob_first_row['transaction_time']
+        ).total_seconds() * 1000
         ob_time_ratio = simulation_time_ms / ob_total_time_elapsed_ms
         self.orderbook['simulation_sleep_time_ms'] = self.orderbook['time_elapsed_ms'].apply(lambda x: x * ob_time_ratio)
 
@@ -116,30 +142,65 @@ class MockBinanceGateway(BaseGateway):
 
     async def produce_candlestick(self):
 
+        total_rows = len(self.candlestick)
+        num_checkpoints = 20  # for 5% intervals
+        # Precompute checkpoint indices
+        checkpoint_indices = {
+            int((i / num_checkpoints) * total_rows) - 1  # -1 because idx is 0-based
+            for i in range(1, num_checkpoints + 1)
+        }
+
+        candlestick_channel = None
+        if self.publisher:
+            candlestick_channel = get_candlestick_channel(self._symbol)
+
         # loop through candlestick
-        for index, row in self.candlestick.iterrows():
+        for index, (_,row) in enumerate(self.candlestick.iterrows()):
             sleep_time_ms = row['simulation_sleep_time_ms']
             await asyncio.sleep(sleep_time_ms / 1_000)
 
-            if self.publisher:
-                candlestick_channel = get_candlestick_channel(self._symbol)
-                candlestick =  self.to_candlestick(row)
+            if candlestick_channel:
+                candlestick = self.candlestick_list[index]
                 self.publisher.publish(candlestick_channel, candlestick)
+
+            if index in checkpoint_indices:
+                percent_complete = int(((index + 1) / total_rows) * 100)
+                logger.info(f"Candlestick production {percent_complete}% complete.")
         # lop through order book
         pass
 
     async def produce_orderbook(self):
         logger.info(f"Producing orderbook data now! {self.publisher}")
 
+        # this section is just to tract prograss
+        total_rows = len(self.orderbook)
+        num_checkpoints = 20  # for 10% intervals
+        # Precompute checkpoint indices
+        checkpoint_indices = {
+            int((i / num_checkpoints) * total_rows) - 1  # -1 because idx is 0-based
+            for i in range(1, num_checkpoints + 1)
+        }
+
+        orderbook_channel = None
+        if self.publisher:
+            orderbook_channel = get_orderbook_channel(self._symbol)
+
+
+        # Ensure last index is included
+        checkpoint_indices.add(total_rows - 1)
         for idx, (_, row) in enumerate(self.orderbook.iterrows()):
             sleep_time_ms = row['simulation_sleep_time_ms']
             await asyncio.sleep(sleep_time_ms / 1_000)
 
-            if self.publisher:
-                orderbook_channel = get_orderbook_channel(self._symbol)
+            if orderbook_channel:
+                # orderbook_channel = get_orderbook_channel(self._symbol)
                 curr_ob = self.orderbook_list[idx]
                 # logger.info(f"sending order book data {curr_ob['timestamp']}")
                 self.publisher.publish(orderbook_channel, curr_ob)
+
+            if idx in checkpoint_indices:
+                percent_complete = int(((idx + 1) / total_rows) * 100)
+                logger.info(f"Orderbook production {percent_complete}% complete.")
 
         # once done with publishing all, just generate statistics
         logger.info(f"Done with order book! {self.publisher}")

@@ -189,6 +189,19 @@ class PortfolioManager:
     def get_realized_pnl(self):
         return self.realized_pnl
 
+    def get_full_portfolio_state(self):
+        return  {
+            "positions": self.positions,
+            "realized_pnl": self.realized_pnl,
+            "unrealized_pnl": self.unrealized_pnl,
+            "last_market_price": self.last_market_price,
+            "total_commissions": self.total_commissions,
+            "total_trade_count": len(self.trade_history),
+            "total_pnl": self.realized_pnl + self.unrealized_pnl['BTCUSDT'],
+            "trade_history": [order.to_dict() for order in self.trade_history]  # Using `to_dict` from OrderEventUpdate
+        }
+
+
 
     def to_dict(self):
         # Convert the class state into a dictionary

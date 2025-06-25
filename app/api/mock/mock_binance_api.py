@@ -89,6 +89,12 @@ class MockBinanceApi(BaseApi):
         # TODO: NEED TO IMPLETEMENT
         pass
 
+    def get_account_balance(self) -> dict:
+        """
+        Fetch OHLCV (candlestick) data.
+        """
+        # TODO: NEED TO IMPLETEMENT
+        pass
 
     def on_new_price(self, data: dict):
         symbol = data.get('contract_name').upper()

@@ -359,6 +359,12 @@ class RiskManager:
 
         current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
 
+
+        if not self.current_atr:
+            return  {
+                "TP/SL hit": False,
+            }
+
         current_atr = float(self.current_atr)
 
         # TODO: think of how to handle this

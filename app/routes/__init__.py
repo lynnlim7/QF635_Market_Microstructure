@@ -2,10 +2,12 @@ from flask import jsonify, request
 
 from app.api.binance_api import BinanceApi
 from app.common.interface_order import Side
+from app.portfolio.portfolio_manager import PortfolioManager
 
-#TODO : implement kill switch route  
 
-def register_routes(app, binance_api:BinanceApi):
+#TODO : implement kill switch route
+
+def register_routes(app, binance_api:BinanceApi, portfolio_manager: PortfolioManager):
     @app.get("/")
     def home():
         return "Welcome to the trading bot!"
@@ -70,6 +72,17 @@ def register_routes(app, binance_api:BinanceApi):
                 side = _side.name,
             )
 
+            return jsonify(result)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.get("/portfolio_state")
+    def get_portfolio_state():
+        if portfolio_manager is None:
+            return jsonify({"error": "Portfolio managed not initialized"}), 503
+
+        try:
+            result = portfolio_manager.get_full_portfolio_state()
             return jsonify(result)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
