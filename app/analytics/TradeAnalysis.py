@@ -14,13 +14,6 @@ from app.utils.func import get_execution_channel
 import psycopg2
 import time
 
-#step 1: implement function to calculate unrealized pnl, comparing with the latest P&L
-#are we able to take unrealized pnl for different time ranges e.g. 1 day, 3 day, 5 day, 1 week
-#step 2: calculate unrealized pnl using FIFO, LIFO, Weighted average cost
-#include flash pnl?
-#implement decision point on when to take the day cutoff for unrealised pnl calc need to fetch usdt price
-#drawdown definition?
-
 logger = logging.getLogger(__name__)
 
 def get_postgres_pool():
@@ -57,13 +50,6 @@ def listen_for_trades():
         except Exception as e:
             logger.error(f"Subscription error: {e}, reconnecting...")
             time.sleep(5) 
-
-# # This function returns the summary
-# def get_trade_summary():
-#     pool = get_postgres_pool()
-#     analysis = TradeAnalysis(db_pool=pool)
-#     summary = analysis.get_summary()
-#     return summary
 
 # Main callable function from main.py
 def run_trade_analysis():
@@ -156,8 +142,7 @@ class TradeAnalysis:
         self.current_prices = prices
         return prices
     def fetch_trade_history_from_postgres(self):
-        # pg_url = f"postgresql://{settings.APP_PG_USER}:{settings.APP_PG_PASSWORD}@{settings.APP_PG_HOST}:{settings.APP_PG_PORT}/{settings.APP_PG_DB}"
-        # engine = create_engine(pg_url)
+
         try:
             with self.engine.connect() as conn:
                 conn.execute(text("SET search_path TO trading_app"))
@@ -230,45 +215,73 @@ class TradeAnalysis:
             logger.error(f"Realized PnL error: {str(e)}")
             return {'total_realized_pnl': 0, 'assets': {}}
 
-    
-    ###unrealized pnl###
-    ##can choose between FIFO or weighted average cost
-    ##weighted average cost is better as we are doing HFT, tracking individual lots is impractical
-    ###Include different time ranges as well e.g. '1D', '3D', '5D', '1W' to look at trades done in previous day/week etc.
+    #calculate unrealized pnl from orders
     def calculate_unrealized_pnl_from_orders(self, time_range: Optional[str] = None):
         if self.df.empty or 'exec_type' not in self.df.columns:
             return {'total_unrealized': 0, 'assets': {}}
 
         df = self.df.copy()
         df = df[df['exec_type'] == 'TRADE']
+        df['last_qty'] = pd.to_numeric(df['last_qty'])
         df['cum_filled_qty'] = pd.to_numeric(df['cum_filled_qty'])
         df['avg_price'] = pd.to_numeric(df['avg_price'])
-
+        df['side'] = df['side'].str.upper()
         df['trade_time_ms'] = pd.to_datetime(df['trade_time_ms'], unit='ms')
         if time_range:
             cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(time_range)
             df = df[df['trade_time_ms'] >= cutoff]
+        if 'side' not in df.columns:
+            raise ValueError("Missing 'side' column in trade data.")
+        positions_data = []
+        for symbol, group in df.groupby('symbol'):
+            # Calculate net quantity
+            print(group[['side', 'last_qty']])
+            buys = group[group['side'] == 'BUY']
+            sells = group[group['side'] == 'SELL']
+            
+            buy_qty = buys['last_qty'].sum()
+            sell_qty = sells['last_qty'].sum()
+            net_qty = buy_qty - sell_qty
+             # Calculate weighted average price
+            if net_qty > 0:  # Net long position
+                avg_price = (buys['last_qty'] * buys['avg_price']).sum() / buy_qty if buy_qty != 0 else 0
+            elif net_qty < 0:  # Net short position
+                avg_price = (sells['last_qty'] * sells['avg_price']).sum() / sell_qty if sell_qty != 0 else 0
+            else:  # Flat position
+                avg_price = 0
+                
+            print(f"{symbol}: buy_qty={buy_qty}, sell_qty={sell_qty}, net_qty={net_qty}, avg_price={avg_price}")
 
-        positions = df.groupby('symbol').agg({
-            'cum_filled_qty': 'sum',
-            'avg_price': 'mean'
-        }).reset_index()
+            positions_data.append({
+                'symbol': symbol,
+                'net_qty': net_qty,
+                'avg_entry_price': avg_price
+            })
+        positions_df = pd.DataFrame(positions_data)
 
         if not self.current_prices:
-            symbols = positions['symbol'].tolist()
+            symbols = positions_df['symbol'].tolist()
             self.fetch_current_prices_from_redis(symbols)
 
         results = {'assets': {}, 'total_unrealized': 0}
-        for _, row in positions.iterrows():
+        for _, row in positions_df.iterrows():
             symbol = row['symbol']
-            qty = row['cum_filled_qty']
-            avg_price = row['avg_price']
+            qty = row['net_qty']
+            entry_price = row['avg_entry_price']
 
             if symbol not in self.current_prices:
                 raise ValueError(f"Missing current price for {symbol}")
             current_price = self.current_prices[symbol]
 
-            unrealized = (current_price - avg_price) * qty
+            # Determine unrealized PnL
+            if net_qty > 0:
+                # Long position
+                unrealized = (current_price - entry_price) * net_qty
+            elif net_qty < 0:
+                # Short position
+                unrealized = (entry_price - current_price) * abs(net_qty)
+            else:
+                unrealized = 0
 
             results['assets'][symbol] = {
                 'quantity': qty,
@@ -323,7 +336,8 @@ class TradeAnalysis:
         #placeholder
         avg_return = returns.mean()
         std_dev = returns.std()
-
+        if std_dev == 0 or np.isnan(std_dev):
+            return 0.0
         #use this if pnl is per-trade
         sharpe_ratio = (avg_return - risk_free_rate) / std_dev
 
@@ -463,6 +477,3 @@ def main():
         print(f"Error calculating Trade Summary: {e}")
 if __name__ == "__main__":
     main()
-    # Run the async main function
-    # import asyncio
-    # asyncio.run(main())
