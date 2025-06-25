@@ -75,27 +75,31 @@ class TradeAnalysis:
     #initialize the params
     def __init__(self, 
                  redis_params: Optional[Dict[str, Any]] = None,
-                current_prices: Optional[Dict[str, float]]= None):
-
-        self.current_prices = current_prices or {}
+                current_prices: Optional[Dict[str, float]]= None, use_db= True):
         self.redis_params = redis_params or {
             "host": settings.REDIS_HOST,
             "port": 6379,
             "db": 0,
             "decode_responses": False
         }
-        self.redis_pool = RedisPool(
+        if use_db:
+            self.redis_pool = RedisPool(
         host=self.redis_params.get("host", "localhost"),
             port=self.redis_params.get("port", 6379),
             db=self.redis_params.get("db", 0),
             decode_responses=self.redis_params.get("decode_responses", False)  # Important: TradeAnalysis uses `redis.asyncio`
 )
-        self.redis = redis.Redis(connection_pool=self.redis_pool.pool)
-        self.df = pd.DataFrame()
-        self.engine = create_engine(
+            self.engine = create_engine(
             f"postgresql://{settings.APP_PG_USER}:{settings.APP_PG_PASSWORD}@{settings.APP_PG_HOST}:{settings.APP_PG_PORT}/{settings.APP_PG_DB}"
         )
+        else:
+            self.engine = None
+        self.redis = redis.Redis(connection_pool=self.redis_pool.pool)
+        self.current_prices = current_prices or {}
 
+        
+        self.df = pd.DataFrame()
+        
         #convert timestamps
         if 'timestamp' in self.df.columns:
             self.df = self.df.sort_values('timestamp')
@@ -237,34 +241,66 @@ class TradeAnalysis:
 
         df = self.df.copy()
         df = df[df['exec_type'] == 'TRADE']
+        df['last_qty'] = pd.to_numeric(df['last_qty'])
         df['cum_filled_qty'] = pd.to_numeric(df['cum_filled_qty'])
         df['avg_price'] = pd.to_numeric(df['avg_price'])
-
+        df['side'] = df['side'].str.upper()
         df['trade_time_ms'] = pd.to_datetime(df['trade_time_ms'], unit='ms')
         if time_range:
             cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(time_range)
             df = df[df['trade_time_ms'] >= cutoff]
+        if 'side' not in df.columns:
+            raise ValueError("Missing 'side' column in trade data.")
+        positions_data = []
+        for symbol, group in df.groupby('symbol'):
+            # Calculate net quantity
+            print(group[['side', 'last_qty']])
+            buys = group[group['side'] == 'BUY']
+            sells = group[group['side'] == 'SELL']
+            
+            buy_qty = buys['last_qty'].sum()
+            sell_qty = sells['last_qty'].sum()
+            net_qty = buy_qty - sell_qty
+             # Calculate weighted average price
+            if net_qty > 0:  # Net long position
+                avg_price = (buys['last_qty'] * buys['avg_price']).sum() / buy_qty if buy_qty != 0 else 0
+            elif net_qty < 0:  # Net short position
+                avg_price = (sells['last_qty'] * sells['avg_price']).sum() / sell_qty if sell_qty != 0 else 0
+            else:  # Flat position
+                avg_price = 0
+                
+            print(f"{symbol}: buy_qty={buy_qty}, sell_qty={sell_qty}, net_qty={net_qty}, avg_price={avg_price}")
 
-        positions = df.groupby('symbol').agg({
-            'cum_filled_qty': 'sum',
-            'avg_price': 'mean'
-        }).reset_index()
+            positions_data.append({
+                'symbol': symbol,
+                'net_qty': net_qty,
+                'avg_entry_price': avg_price
+            })
+        positions_df = pd.DataFrame(positions_data)
 
         if not self.current_prices:
-            symbols = positions['symbol'].tolist()
+            symbols = positions_df['symbol'].tolist()
             self.fetch_current_prices_from_redis(symbols)
 
         results = {'assets': {}, 'total_unrealized': 0}
-        for _, row in positions.iterrows():
+        for _, row in positions_df.iterrows():
             symbol = row['symbol']
-            qty = row['cum_filled_qty']
-            avg_price = row['avg_price']
+            qty = row['net_qty']
+            entry_price = row['avg_entry_price']
 
             if symbol not in self.current_prices:
                 raise ValueError(f"Missing current price for {symbol}")
             current_price = self.current_prices[symbol]
 
-            unrealized = (current_price - avg_price) * qty
+            # Determine unrealized PnL
+            if net_qty > 0:
+                # Long position
+                unrealized = (current_price - entry_price) * net_qty
+            elif net_qty < 0:
+                # Short position
+                unrealized = (entry_price - current_price) * abs(net_qty)
+            else:
+                unrealized = 0
 
             results['assets'][symbol] = {
                 'quantity': qty,
@@ -319,7 +355,8 @@ class TradeAnalysis:
         #placeholder
         avg_return = returns.mean()
         std_dev = returns.std()
-
+        if std_dev == 0 or np.isnan(std_dev):
+            return 0.0
         #use this if pnl is per-trade
         sharpe_ratio = (avg_return - risk_free_rate) / std_dev
 
@@ -364,8 +401,26 @@ class TradeAnalysis:
         turnover_val = self.calc_turnover(book_size)
         fit_val = sharpe_val * np.sqrt((abs(ret_val)/(max(turnover_val, 0.125))))
         return fit_val
+    
+    #additional function to load trades from separate source if required
+    def load_trades_from_json(self, trades: List[Dict]):
+        df = pd.DataFrame(trades)
+        if 'trade_time_ms' in df.columns:
+            df['trade_time_ms'] = pd.to_datetime(df['trade_time_ms'], unit='ms', errors='coerce')
+            df = df.dropna(subset=['trade_time_ms'])
+        self.df = df.reset_index(drop=True)
 
-    def get_summary(self, book_size: float = 100000):
+    #setting prices from best bid/ask
+    def set_prices_from_best_bid_ask(self, best_bid_ask: Dict[str, Dict[str, float]]):
+        self.current_prices = {}
+        for symbol, prices in best_bid_ask.items():
+            bid = prices.get("bid", 0)
+            ask = prices.get("ask", 0)
+            if bid > 0 and ask > 0:
+                self.current_prices[symbol] = (bid + ask) / 2
+
+    def get_summary(self, book_size: float = 100000, 
+                    trades_json: Optional[List[Dict]] = None, best_bid_ask: Optional[Dict[str, Dict[str, float]]] = None):
         summary = {
         "win_loss_ratio": 0.0,
         "realized_pnl": {"total_realized_pnl": 0, "assets": {}},
@@ -376,6 +431,14 @@ class TradeAnalysis:
         "fitness": 0.0
         }
         try:
+            #load trades if they are provided
+            if trades_json:
+                self.load_trades_from_json(trades_json)
+
+            #fetch current prices if not already set
+            if best_bid_ask:
+                self.set_prices_from_best_bid_ask(best_bid_ask)
+
             print(self.df.head(5))
             summary["win_loss_ratio"] = self.calculate_win_loss_ratio()
             summary["realized_pnl"] = self.calculate_realized_pnl()
