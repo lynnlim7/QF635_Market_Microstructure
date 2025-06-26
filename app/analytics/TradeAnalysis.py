@@ -306,7 +306,7 @@ class TradeAnalysis:
         subscriber.start_subscribing()
 
     #calculate win and losses
-    def calculate_win_loss_ratio(self):
+    def calculate_win_loss_ratio(self, use_unrealized=True):
         try:
             if self.df.empty or 'realized_pnl' not in self.df.columns:
                 return 0.0
@@ -314,12 +314,18 @@ class TradeAnalysis:
             # Ensure we have valid data
             df = self.df.copy()
             df = df[df['realized_pnl'].notna()]
-            
+            if use_unrealized:
+                unrealized_result = self.calculate_unrealized_pnl_from_orders()
+                total_unrealized = unrealized_result['total_unrealized']
+                df['unrealized_pnl'] = total_unrealized / len(df) if len(df) > 0 else 0
+                df['total_pnl'] = df['realized_pnl'] + df['unrealized_pnl']
+            else:
+                df['total_pnl'] = df['realized_pnl']
             if len(df) == 0:
                 return 0.0
                 
-            wins = len(df[df['realized_pnl'] > 0])
-            losses = len(df[df['realized_pnl'] < 0])
+            wins = len(df[df['total_pnl'] > 0])
+            losses = len(df[df['total_pnl'] < 0])
             
             if losses == 0:
                 return 100.0 if wins > 0 else 0.0  # Cap at 100:1 ratio
@@ -327,32 +333,48 @@ class TradeAnalysis:
         except Exception as e:
             logger.error(f"Win/loss ratio error: {str(e)}")
             return 0.0
+        
+    def get_total_pnl_series(self, use_unrealized=True, freq = '15T'):
+        df = self.df.copy()
+            # Use trade time to create a time index
+  # Ensure all values are numeric
+        df['realized_pnl'] = pd.to_numeric(df['realized_pnl'], errors='coerce').fillna(0)
+        df['timestamp'] = pd.to_datetime(df['trade_time_ms'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        # Resample PnL by time bucket
+        pnl_series = df['realized_pnl'].resample(freq).sum().fillna(0).cumsum()
+        if use_unrealized:
+            # Append a final row with unrealized PnL if you want to include it
+            unrealized_result = self.calculate_unrealized_pnl_from_orders()
+            total_unrealized = unrealized_result['total_unrealized']
+            # Add the unrealized PnL at the last bucket to simulate mark-to-market
+            last_time = pnl_series.index[-1] + pd.Timedelta(freq)
+            pnl_series.loc[last_time] = pnl_series.iloc[-1] + total_unrealized
+            return pnl_series
 
+    
     #only used for realized pnl
-    def calc_sharpe_ratio(self, risk_free_rate =0.0):
+    def calc_sharpe_ratio(self, risk_free_rate =0.0, use_unrealized=True):
         if len(self.df) < 2:
             return 0.0
-        returns = pd.to_numeric(self.df['realized_pnl'])
-        #placeholder
-        avg_return = returns.mean()
-        std_dev = returns.std()
-        if std_dev == 0 or np.isnan(std_dev):
+        series = self.get_total_pnl_series(use_unrealized=use_unrealized, freq='15T')
+        returns = series.diff().dropna()
+        if returns.std() == 0:
             return 0.0
-        #use this if pnl is per-trade
-        sharpe_ratio = (avg_return - risk_free_rate) / std_dev
 
-        #use this if pnl is daily returns
-        #sharpe_ratio = sqrt(252) * ((avg_return - risk_free_rate) / std_dev)
+        sharpe = (returns.mean() / returns.std()) * np.sqrt(96) 
+        return sharpe
 
-        return sharpe_ratio
-
-    def calc_max_drawdown (self, book_size: float):
-
-        cumulative = pd.to_numeric(self.df['realized_pnl']).cumsum()
-        peak = cumulative.expanding(min_periods=1).max()
-        drawdown = (peak - cumulative) 
+    def calc_max_drawdown (self, book_size: float,  use_unrealized=True):
+        if use_unrealized:
+            pnl = self.get_total_pnl_series().cumsum()
+        else:
+            pnl = pd.to_numeric(self.df['realized_pnl'], errors='coerce').fillna(0).cumsum()
+        if pnl.diff().abs().mean() > 0:
+            pnl = pnl.cumsum()
+        peak = pnl.expanding(min_periods=1).max()
+        drawdown = (peak - pnl) 
         max_drawdown_dollars = drawdown.max()
-
         max_drawdown_pct = (max_drawdown_dollars/ (0.5 * book_size) * 100)
         return max_drawdown_pct
     
@@ -376,9 +398,12 @@ class TradeAnalysis:
             logger.error(f"Turnover calculation error: {str(e)}")
             return 0.0
 
-    def calc_fitness(self, book_size: float):
-        sharpe_val = self.calc_sharpe_ratio()
-        ret_val = pd.to_numeric(self.df['realized_pnl']).sum()
+    def calc_fitness(self, book_size: float, use_unrealized=True):
+        sharpe_val = self.calc_sharpe_ratio(use_unrealized=use_unrealized)
+        pnl_series = self.get_total_pnl_series()
+        if pnl_series.empty:
+            return 0.0
+        ret_val = pnl_series.iloc[-1] 
         turnover_val = self.calc_turnover(book_size)
         fit_val = sharpe_val * np.sqrt((abs(ret_val)/(max(turnover_val, 0.125))))
         return fit_val
@@ -395,8 +420,8 @@ class TradeAnalysis:
     def set_prices_from_best_bid_ask(self, best_bid_ask: Dict[str, Dict[str, float]]):
         self.current_prices = {}
         for symbol, prices in best_bid_ask.items():
-            bid = prices.get("bid", 0)
-            ask = prices.get("ask", 0)
+            bid = prices.get("best_bid", 0)
+            ask = prices.get("best_ask", 0)
             if bid > 0 and ask > 0:
                 self.current_prices[symbol] = (bid + ask) / 2
 
