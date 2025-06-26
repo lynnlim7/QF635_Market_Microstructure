@@ -336,6 +336,7 @@ class TradeAnalysis:
         
     def get_total_pnl_series(self, use_unrealized=True, freq = '15T'):
         df = self.df.copy()
+        #copy value
             # Use trade time to create a time index
   # Ensure all values are numeric
         df['realized_pnl'] = pd.to_numeric(df['realized_pnl'], errors='coerce').fillna(0)
