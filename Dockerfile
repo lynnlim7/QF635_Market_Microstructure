@@ -4,6 +4,7 @@ WORKDIR /main
 
 COPY requirements.txt ./
 COPY .env ./
+COPY entrypoint.sh ./
 
 RUN pip install --no-cache-dir psycopg2-binary sqlalchemy alembic httpx
 RUN pip3 install -r requirements.txt
