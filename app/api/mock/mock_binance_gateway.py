@@ -17,14 +17,14 @@ Mock Gateway
 
 # config
 
-SIMULATION_TIME_IN_MINUTES = 60
+SIMULATION_TIME_IN_MINUTES = 30
 # if u want to cut data into half -> put 1/2
 DATA_RATIO = 1
 
 # CANDLESTICK_FILE_NAME = "BTCUSDT-1m-2024-03-16.csv"
-CANDLESTICK_FILE_NAME = "BTCUSDT-1m-2024-03-30.csv"
+CANDLESTICK_FILE_NAME = "BTCUSDT-1m-2024-03-24.csv"
 # ORDERBOOK_FILE_NAME = "BTCUSDT_240329-bookTicker-2024-03-16.csv"
-ORDERBOOK_FILE_NAME = "BTCUSDT_240329-bookTicker-2024-03-30.csv"
+ORDERBOOK_FILE_NAME = "BTCUSDT_240329-bookTicker-2024-03-24.csv"
 
 
 class MockBinanceGateway(BaseGateway):
@@ -97,7 +97,7 @@ class MockBinanceGateway(BaseGateway):
         orderbook_df['transaction_time'] = pd.to_datetime(orderbook_df['transaction_time'], unit='ms')
         resampled_df = (
             orderbook_df.set_index('transaction_time')
-            .resample('10s')
+            .resample('20s')
             .agg({'best_bid_price': 'last', 'best_bid_qty': 'last', 'best_ask_price': 'last', 'best_ask_qty': 'last',
                   'update_id': 'last', 'event_time': 'last'})
             .dropna()

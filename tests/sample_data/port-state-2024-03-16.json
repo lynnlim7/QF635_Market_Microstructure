@@ -1,0 +1,21 @@
+{
+    "positions": {
+        "BTCUSDT": {
+            "qty": -0.027,
+            "average_price": 70035.9
+        }
+    },
+    "realized_pnl": -10.763900000000124,
+    "unrealized_pnl": {
+        "BTCUSDT": 112.49279999999985
+    },
+    "last_market_price": {
+        "BTCUSDT": {
+            "best_bid": 65845.5,
+            "best_ask": 65869.5
+        }
+    },
+    "total_commissions": 4.71650665,
+    "total_trade_count": 13,
+    "total_pnl": 101.72889999999973
+}
