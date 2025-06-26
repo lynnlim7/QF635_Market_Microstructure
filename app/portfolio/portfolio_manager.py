@@ -1,5 +1,4 @@
 import pandas as pd
-from tensorflow import timestamp
 
 from app.analytics.TradeAnalysis import TradeAnalysis
 from app.common.order_event_update import OrderEventUpdate
