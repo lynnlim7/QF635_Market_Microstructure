@@ -10,7 +10,7 @@ We build an automated **trading bot** that operates based on MACD signals, using
 
 To run this project, you'll need to have [Docker](https://docs.docker.com/get-docker/) installed.
 
-It uses the following components :
+It uses the following components (started via docker) :
 
 1. Redis
 2. PostgresSQL (database)
@@ -19,6 +19,8 @@ It uses the following components :
 ---
 
 ## ▶️ How to Run
+
+Create a `.env` file using `.env.example` as template.
 
 Start the trading bot with:
 

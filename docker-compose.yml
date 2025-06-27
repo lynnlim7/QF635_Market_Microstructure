@@ -6,7 +6,6 @@ services:
       - "6379:6379"
     restart: always
     cpuset: "3"
-#    network_mode: host
     volumes:
       - redis_data:/data
     healthcheck:
@@ -40,7 +39,23 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-#    network_mode: host
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    cpuset: "1"
+
+  backtesting:
+    build:
+      context: .
+    command: ["bash", "entrypoint.sh"]
+    depends_on:
+      redis :
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      IS_SIMULATION: "true"
     ports:
       - "8080:8080"
     env_file:
