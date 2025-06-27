@@ -2,7 +2,8 @@ import logging
 import os 
 import sys
 from datetime import datetime 
-from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler, QueueHandler, QueueListener
+from multiprocessing import Queue
 
 
 def setup_logger(
@@ -14,7 +15,8 @@ def setup_logger(
         rotation_int: datetime|str = "midnight", 
         rotate_utc: bool = True, # universal time rotation
         log_type: str = None,
-        enable_console: bool = False
+        enable_console: bool = False,
+        queue : Queue = None
 ) -> logging.Logger:
     log_file = logger_name + ".log"
     log_filepath = os.path.join(logger_path, log_file)
@@ -56,6 +58,15 @@ def setup_logger(
 
     # prevent it from writing into the higher leve
     logger.propagate = False
+
+    if not logger.hasHandlers():
+        if queue:
+            handler = QueueHandler(queue)
+            logger.addHandler(handler)
+        elif enable_console:
+            handler = logging.StreamHandler(sys.stdout)
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
     return logger
 
 
@@ -68,5 +79,11 @@ def set_basic_logger(_logger_name: str) -> logging.Logger:
     # prevent duplicated logs
     logger.propagate = False
     return logger
+
+def setup_log_listener(queue: Queue):
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter("%(asctime)s [%(processName)-12.12s] [%(levelname)-5.5s]  %(message)s")
+    handler.setFormatter(formatter)
+    return QueueListener(queue, handler)
 
 main_logger = set_basic_logger("main")

@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     REDIS_SOCKET_CONNECT_TIMEOUT: float = 5.0
     REDIS_RETRY_ON_TIMEOUT: float = 5.0
     REDIS_HEALTH_CHECK_INTERVAL: int = 30
-    REDIS_DECODE_RESPONSE: bool = True 
+    REDIS_DECODE_RESPONSE: bool = False
     REDIS_PREFIX: str = "market_data"
 
     # Risk management 

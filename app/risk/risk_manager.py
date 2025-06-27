@@ -2,10 +2,24 @@ import numpy as np
 import pandas as pd
 from binance import Client
 from app.utils.config import settings
+from app.services import RedisPool
 from app.utils.logger import main_logger as logger
 from app.portfolio.portfolio_manager import PortfolioManager
 from app.api.binance_api import BinanceApi
 from app.services.circuit_breaker import RedisCircuitBreaker
+
+import msgspec
+import asyncio
+import threading
+from collections import deque, defaultdict
+from app.common.interface_risk import RiskManagerSignal
+from app.common.interface_book import OrderBook, KlineEvent
+from app.common.interface_message import RedisMessage, RequestNotification
+from app.common.interface_portfolio import PortfolioStatsRequest, PortfolioStatsResponse
+from app.common.interface_api import FuturesAccountBalance, FuturesAPIOrder, FuturesPositionResponse
+from datetime import datetime, timezone
+from queue import Queue
+import uuid
 
 #TODO: explain thought process on take profit/ stop loss - should we sell everything? or pause trading
 #TODO: listen to depth order book and take the mid price from best bid and ask
@@ -16,18 +30,16 @@ from app.services.circuit_breaker import RedisCircuitBreaker
 class RiskManager:
     def __init__(self, 
                  symbol: str,
-                 api:BinanceApi,
-                 portfolio_manager:PortfolioManager,
-                 circuit_breaker: RedisCircuitBreaker,
+                #  api:BinanceApi,
+                #  circuit_breaker: RedisCircuitBreaker,
+                 redis_pool : RedisPool, 
                  max_risk_per_trade_pct:float = settings.MAX_RISK_PER_TRADE_PCT, 
                  max_absolute_drawdown:float = settings.MAX_ABSOLUTE_DRAWDOWN,
                  max_relative_drawdown:float = settings.MAX_RELATIVE_DRAWDOWN, 
                  max_exposure_pct:float = settings.MAX_EXPOSURE_PCT,
                  ):
-        self.api = api
         self.symbol = symbol
-        self.portfolio_manager = portfolio_manager
-        self.circuit_breaker = circuit_breaker
+        # self.circuit_breaker = circuit_breaker
         self.max_risk_per_trade_pct = max_risk_per_trade_pct
         self.max_absolute_drawdown = max_absolute_drawdown
         self.max_relative_drawdown = max_relative_drawdown
@@ -35,7 +47,6 @@ class RiskManager:
 
 
         self.active_trades = {}
-        self.df_orderbook = {}  
         self.df_candlestick = {}  
         self.current_value = 0.0
         self.current_position_size = None
@@ -45,68 +56,111 @@ class RiskManager:
         self.initial_value = None
         self.real_data_initialized = False
 
-    def on_new_orderbook(self, data:dict):
-        if not isinstance(data, dict):
+        self.redis_pool = redis_pool
+        self._Channels = [
+            "market_data:orderbook:*"
+            "market_data:candlestick:*",
+            "Signal"
+            "Response"
+        ]
+
+        self.order_book_data = defaultdict(lambda : deque(500))
+        self.candlestick_data = defaultdict(lambda : deque(500))
+        self.mid_price = defaultdict(float)
+        self.response_promise = defaultdict(lambda : asyncio.Queue(1))
+
+    def on_new_orderbook(self, data: OrderBook):
+        if not isinstance(data, OrderBook):
             logger.warning(f"Invalid data format for orderbook: {data}")
             return
             
         logger.info("Processing orderbook data.")
 
-        timestamp = pd.to_datetime(data.get("timestamp", None), unit='ms')
-        symbol = data.get('contract_name', self.symbol).upper()
+        timestamp = datetime.fromtimestamp(data.timestamp, tz=timezone.utc)
+        symbol = data.contract_name.upper()
         
         logger.info(f"Processing orderbook for symbol: {symbol}")
 
-        bids = data.get('bids', [])
-        asks = data.get('asks', [])
-        best_bid = float(bids[0]["price"])
-        best_ask = float(asks[0]["price"])
+        bids = data.bids
+        asks = data.asks
+        best_bid = float(bids[0].price)
+        best_ask = float(asks[0].price)
         mid_price = (best_ask + best_bid)/2
+        self.mid_price[symbol] = mid_price
         spread = best_ask - best_bid
         spread_pct = spread/mid_price
-           
-        row = pd.DataFrame([{
-            "timestamp": timestamp,
-            "symbol": symbol,
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "mid_price": mid_price,
-            "spread": spread,
-            "spread_pct": spread_pct
-        }]).set_index("timestamp")
-            
-        if symbol not in self.df_orderbook:
-            self.df_orderbook[symbol] = row
+
+        row = (
+            timestamp,
+            symbol,
+            best_bid,
+            best_ask,
+            spread,
+            spread_pct,
+        )
+
+        if symbol not in self.order_book_data : 
             logger.info(f"Created new orderbook entry for symbol: {symbol}")
-        else:
-            self.df_orderbook[symbol] = pd.concat([self.df_orderbook[symbol], row]).tail(500)
+        else :
             logger.info(f"Updated orderbook for symbol: {symbol}")
 
+        self.order_book_data[symbol].append(row)
         self.calculate_position_size()
         # self.manage_position(symbol)
-           
-    def on_new_candlestick(self, data):
+
+    def get_orderbook_df(self, symbol : str) -> pd.DataFrame : 
+        columns = [
+            "timestamp",
+            "symbol",
+            "best_bid",
+            "best_ask",
+            "mid_price",
+            "spread",
+            "spread_pct"
+        ]
+
+        df = pd.DataFrame(
+            self.order_book_data[symbol],
+            columns=columns
+        ).set_index("timestamp")
+
+        return df
+
+    def on_new_candlestick(self, data: KlineEvent):
         logger.info("Processing new candlestick data.")
-        if isinstance(data, dict):
-            symbol = data.get('symbol', self.symbol).upper()
-            timestamp = pd.to_datetime(data['start_time'], unit='ms')
+        if isinstance(data, KlineEvent):
+            timestamp = datetime.fromtimestamp(data.timestamp, tz=timezone.utc)
+            symbol = data.contract_name.upper()
 
-            df_candlestick = pd.DataFrame([{
-                'timestamp': timestamp,
-                'open': float(data['open']),
-                'high': float(data['high']),
-                'low': float(data['low']),
-                'close': float(data['close']),
-                'volume': float(data['volume']),
-                'is_closed': True # get full candle
-            }]).set_index('timestamp')
-            
-            if symbol not in self.df_candlestick:
-                self.df_candlestick[symbol] = df_candlestick
-            else:
-                self.df_candlestick[symbol] = pd.concat([self.df_candlestick[symbol], df_candlestick]).tail(500)
+            row = (
+                timestamp,
+                float(data.open),
+                float(data.high),
+                float(data.low),
+                float(data.close),
+                float(data.volume),
+                True
+            )
 
+            self.candlestick_data[symbol].append(row)
             self.calculate_atr()
+
+    def get_candlestick_df(self, symbol : str) -> pd.DataFrame :
+            columns = [
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "is_closed"
+            ]
+
+            df = pd.DataFrame(
+                self.candlestick_data[symbol],
+                columns=columns,
+            )
+            return df
     
     # average true range - measure price vol of asset approx 14 days 
     def calculate_atr(self, period=14):
@@ -134,7 +188,7 @@ class RiskManager:
             self.current_atr = float(atr.iloc[-1]) if not atr.empty else None
    
             if self.current_atr is not None and self.current_atr > 0:
-                if self.symbol in self.df_orderbook and not self.df_orderbook[self.symbol].empty:
+                if self.symbol in self.order_book_data and not self.get_orderbook_df(self.symbol).empty:
                     self.calculate_position_size()
             return atr
 
@@ -150,12 +204,12 @@ class RiskManager:
             logger.warning("Unable to calculate ATR. Skipping position sizing and trade.")
             return
 
-        if self.symbol not in self.df_orderbook or self.df_orderbook[self.symbol].empty:
+        if self.symbol not in self.order_book_data or self.get_orderbook_df(self.symbol).empty:
             logger.warning(f"No orderbook data available for {self.symbol}")
             return
 
         try:
-            entry_price = self.df_orderbook[self.symbol]['mid_price'].iloc[-1]
+            entry_price = self.mid_price[self.symbol]
             if entry_price <= 0:
                 logger.warning(f"Invalid entry price: {entry_price}")
 
@@ -220,21 +274,20 @@ class RiskManager:
         # symbol = symbol.upper()
 
         ## from portfolio manager 
-        portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-        print(f"Portfolio stats: {portfolio_stats}!!!!!!!!!!!!!!!!")
+        portfolio_stats = self.request_portfolio_manager(topic="stats", params={"symbol" : symbol})
 
-        position = portfolio_stats.get('position')
-        current_position_size = round(position.get('qty', 0.0) if position else 0.0, 8)
-        unrealized_pnl = portfolio_stats.get('unrealized_pnl', 0.0) if position else 0.0
-        cash_balance = portfolio_stats.get('cash_balance', 0.0)
+        position = portfolio_stats.position
+        current_position_size = position.qty
+        unrealized_pnl = portfolio_stats.unrealized_pnl
+        cash_balance = portfolio_stats.cash_balance
 
         logger.info(f"Current position size for {symbol}: {current_position_size}")
 
-        if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
-            logger.warning(f"No orderbook data available for {symbol}. Available symbols: {list(self.df_orderbook.keys())}")
+        if symbol not in self.order_book_data or self.get_orderbook_df(symbol).empty:
+            logger.warning(f"No orderbook data available for {symbol}. Available symbols: {list(self.order_book_data.keys())}")
             return
         
-        current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
+        current_price = self.mid_price[symbol]
 
         total_portfolio_value = cash_balance + unrealized_pnl
         current_exposure = abs(current_position_size * current_price)
@@ -348,17 +401,17 @@ class RiskManager:
         logger.info(f"Managing position for {symbol}.")
 
         ## from portfolio manager
-        portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
+        portfolio_stats = self.request_portfolio_manager(topic="stats", params={"symbol" : symbol})
 
-        position = portfolio_stats.get('position')
-        entry_price = float(position.get('average_price', '0.0')) if position else 0.0 # filled price
-        current_position_size = round(position.get('qty', 0.0) if position else 0.0, 8)
-        unrealized_pnl = portfolio_stats.get('unrealized_pnl', 0.0)
+        position = portfolio_stats.position
+        entry_price = position.average_price
+        current_position_size = position.qty
+        unrealized_pnl = portfolio_stats.unrealized_pnl
 
-        if symbol not in self.df_orderbook or self.df_orderbook[symbol].empty:
-            logger.warning(f"No orderbook data available for {symbol}. Available symbols: {list(self.df_orderbook.keys())}")
+        if symbol not in self.order_book_data or self.get_orderbook_df(symbol).empty:
+            logger.warning(f"No orderbook data available for {symbol}. Available symbols: {list(self.order_book_data.keys())}")
 
-        current_price = self.df_orderbook[symbol]['mid_price'].iloc[-1]
+        current_price = self.mid_price[symbol]
 
         current_atr = float(self.current_atr)
 
@@ -489,7 +542,7 @@ class RiskManager:
 
     def get_positions_from_binance(self) -> dict:
         try:
-            positions_data = self.api.get_current_position()
+            positions_data = self.get_current_position()
             positions = {}
             
             if isinstance(positions_data, list):
@@ -532,7 +585,7 @@ class RiskManager:
                 
                 logger.critical(f"Liquidating {symbol}: {qty} via {direction}")
             
-                self.api.place_market_order(
+                self.place_market_order(
                     symbol=symbol,
                     side=direction,
                     qty=qty
@@ -579,7 +632,7 @@ class RiskManager:
         try:
             logger.info("Initializing drawdown tracking with binance data...")
 
-            balance_data = self.api.get_account_balance()
+            balance_data = self.get_account_balance()
             real_balance = 0.0
             
             if isinstance(balance_data, list):
@@ -588,7 +641,7 @@ class RiskManager:
                         real_balance = float(balance.get('balance', 0))
                         break
 
-            positions_data = self.api.get_current_position()
+            positions_data = self.get_current_position()
             total_unrealized_pnl = 0.0
             
             if isinstance(positions_data, list):
@@ -613,7 +666,7 @@ class RiskManager:
 
     def get_portfolio_value(self) -> float:
         try:
-            balance_data = self.api.get_account_balance()
+            balance_data = self.get_account_balance()
             print(f"Balance data: {balance_data}!!!!!!!!!!!!!!!!!!!!!!!!")
             real_balance = 0.0
             
@@ -624,7 +677,7 @@ class RiskManager:
                         break
             
             # get positions and calculate total unrealized PnL
-            positions_data = self.api.get_current_position()
+            positions_data = self.get_current_position()
             total_unrealized_pnl = 0.0
             
             if isinstance(positions_data, list):
@@ -642,16 +695,116 @@ class RiskManager:
             return 0.0
 
 
+    async def accept_message(self) :
+        signal_decoder = msgspec.msgpack.Decoder(RiskManagerSignal)
+        order_book_decoder = msgspec.msgpack.Decoder(OrderBook)
+        candlestick_decoder = msgspec.msgpack.Decoder(KlineEvent)
+
+        while True : 
+            msg = await self.get_from_queue(self._subscriber_queue)
+            if msg.topic == "signal" :
+                signal_decoded = signal_decoder.decode(msg.value)
+                self.on_signal_update(signal_decoded.signal, signal_decoded.symbol)
+            elif msg.topic == "order_book_update" :
+                order_book_decoded = order_book_decoder.decode(msg.value)
+                self.on_new_orderbook(order_book_decoded)
+            elif msg.topic == "response" :
+                if msg.correlation_id in self.response_promise : 
+                    await self.response_promise[msg.correlation_id].put(msg.value)
+            elif msg.topic == "candlestick" : 
+                candlestick_decoded = candlestick_decoder.decode(msg.value)
+                self.on_new_candlestick(candlestick_decoded)
+
+    async def get_from_queue(self, q : Queue) -> RedisMessage :
+        loop = self._loop
+        return await loop.run_in_executor(None, q.get)
+
+    async def _wait_promise(self, correlation_id) : 
+        q = self.response_promise[correlation_id]
+        out = await q.get()
+        del self.response_promise[correlation_id]
+        return out
+
     
+    def start(self) :
+        self._loop = asyncio.new_event_loop()
+        threading.Thread(target=self._loop.run_forever, daemon=True).start()
+        self._subscriber_queue = Queue()
 
+        asyncio.run_coroutine_threadsafe(self.accept_message(), loop=self._loop)
+
+        self._publisher = self.redis_pool.create_publisher()
+        self._subscriber = self.redis_pool.create_subscriber(self._Channels, q=self._subscriber_queue)
+
+    def _create_promise(self) -> str : 
+        correlation_id = str(uuid.uuid4())
+        self.response_promise[correlation_id] = asyncio.Queue(1)
+        return correlation_id
+    
+    def _wait_response(self, correlation_id) :
+        response_fut = asyncio.run_coroutine_threadsafe(self._wait_promise(correlation_id), loop=self._loop)
+        response = response_fut.result()
+        return response
+    
+    def _request_and_wait(self, topic, channel, payload) : 
+        correlation_id = self._create_promise()
+        self._publisher.publish_sync(channel, payload, topic, set_key=False, correlation_id=correlation_id)
+        response = self._wait_response(correlation_id)
+        return response
+
+    def request_portfolio_manager(self, topic: str, params: dict) :
+        if topic == "stats" : 
+            publish_channel = "PortfolioManager@stats"
+            response = self._request_and_wait(topic, publish_channel, PortfolioStatsRequest(**params))
+            decoder = msgspec.msgpack.Decoder(type=PortfolioStatsResponse) 
+            if response : 
+                return decoder.decode(response)
             
-
-
-
+    def request_api(self, topic: str, params: dict = {}) :
+        if topic == "account_balance" : 
+            account_balance_decoder = msgspec.msgpack.Decoder(FuturesAccountBalance)
+            publish_channel = "API@account_balance"
+            response = self._request_and_wait(topic, publish_channel, RequestNotification.create())
+            if response :
+                account_balance = account_balance_decoder.decode(response)
+            else : 
+                raise Exception()
+            if FuturesAccountBalance.errMsg != "" : 
+                return account_balance
+            return []
         
-
-
+        elif topic == "orders" : 
+            account_balance_decoder = msgspec.msgpack.Decoder(FuturesAccountBalance)
+            publish_channel = "API@orders"
+            response = self._request_and_wait(topic, publish_channel, FuturesAPIOrder.create_order(**params))
+            account_balance = account_balance_decoder.decode(response)
+            if account_balance.errMsg != "" : 
+                return account_balance
+            return []
         
+        elif topic == "positions" : 
+            positions_decoder = msgspec.msgpack.Decoder(FuturesPositionResponse) 
+            publish_channel = "API@positions"
+            response = self._request_and_wait(topic, publish_channel, RequestNotification.create())
+            positions = positions_decoder.decode(response)
+
+            if positions.errMsg != "" :
+                return positions
+            return []
+        
+    def get_account_balance(self) : 
+        return self.request_api("account_balance")
+    
+    def get_current_position(self) : 
+        return self.request_api("positions")
+    
+    def place_market_order(self, symbol : str, side: str, qty: float) :
+        params = {
+            "symbol" : symbol,
+            "side" : side,
+            "qty" : qty
+        }
+        return self.request_api("orders", params)
 
 
 

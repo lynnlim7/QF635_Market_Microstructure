@@ -1,23 +1,21 @@
+from typing import List, Optional
+import msgspec
+from decimal import Decimal
 # A price tier in the order book
-class PriceLevel:
-    def __init__(self, price: float, size: float, quote_id: str = None):
-        self.price = price
-        self.size = size
-        self.quote_id = quote_id
+
+class PriceLevel(msgspec.Struct, gc=False, array_like=True):
+    price : Decimal
+    size : Decimal
 
     def __str__(self):
         return '[' + str(self.price) + " | " + str(self.size) + ']'
 
-    def to_dict(self):
-        return {"price": self.price, "quantity": self.size}
-
 # An order book with bid and ask sides
-class OrderBook:
-    def __init__(self, timestamp: float, contract_name: str, bids: [PriceLevel], asks: [PriceLevel]):
-        self.contract_name = contract_name
-        self.timestamp = timestamp
-        self.bids = bids
-        self.asks = asks
+class OrderBook(msgspec.Struct, frozen=True) :
+    contract_name : str
+    timestamp : int 
+    bids : List[PriceLevel]
+    asks : List[PriceLevel]
 
     def __str__(self):
         string = ' BIDS: '
@@ -31,18 +29,14 @@ class OrderBook:
         return string
 
     def get_best_bid(self):
-        return self.bids[0].price
+        if len(self.bids) > 0 :
+            return self.bids[0].price
+        return 0
 
     def get_best_ask(self):
-        return self.asks[0].price
-
-    def to_dict(self):
-        return {
-            "contract_name": self.contract_name,
-            "timestamp": self.timestamp,
-            "bids": [b.to_dict() for b in self.bids],
-            "asks": [a.to_dict() for a in self.asks],
-        }
+        if len(self.asks) > 0 : 
+            return self.asks[0].price
+        return 0
 
 # A venue order book telling us the exchange that provides the order book
 class VenueOrderBook:
@@ -55,3 +49,20 @@ class VenueOrderBook:
 
     def __str__(self):
         return '{}={}'.format(self.exchange_name, self.book)
+    
+class KlineEvent(msgspec.Struct, array_like=True, gc=False) :
+    symbol: str
+    interval: str
+    open: float
+    close: float
+    high: float
+    low: float
+    volume: float
+    is_closed: bool
+    start_time: int
+    end_time: int
+    source: str = "candlestick"  # optional with default value
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "KlineEvent":
+        return cls(**data)

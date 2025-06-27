@@ -1,11 +1,12 @@
 import msgspec
-from app.common.websockets import TimeInterval
+from app.common.constants import TimeInterval
 from decimal import Decimal
 
 
 __all__ = [
     "AveragePrice",
     "BookTicker",
+    "KlineData"
 ]
 
 class AveragePrice(msgspec.Struct) : 
@@ -52,3 +53,12 @@ class BookTicker(msgspec.Struct) :
         denominator = self.best_ask_qty + self.best_bid_qty
         return numerator/denominator
     
+class KlineData(msgspec.Struct, gc=False) : 
+    symbol : str
+    timestamp : int
+    open : Decimal
+    high : Decimal
+    close : Decimal
+    low : Decimal
+    volume : Decimal
+

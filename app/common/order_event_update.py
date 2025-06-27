@@ -6,12 +6,11 @@ from typing import Any, Dict
 from app.utils.data_class_utils import to_clean_dict
 from models import OrderStatus, ExecutionType
 from models.trades import OrderType, OrderSide, OrderTimeInForce
+import msgspec
 
 SGT = timezone(timedelta(hours=8))  # Singapore Time
 
-# frozen means you cant edit the variables, remove if deemed necessary
-@dataclass(slots=True, frozen=True)
-class OrderEventUpdate:
+class OrderEventUpdate(msgspec.Struct, gc=False, array_like=True) : 
     # ---- core identifiers ---------------------------------------------------
     symbol: str
     order_id: int
@@ -47,6 +46,7 @@ class OrderEventUpdate:
     activation_price: Decimal
     callback_rate: Decimal
 
+
     # ------------------------------------------------------------------------
     @classmethod
     def from_user_stream(cls, raw: Dict[str, Any]) -> "OrderEventUpdate":
@@ -68,23 +68,23 @@ class OrderEventUpdate:
             order_type=o["o"],
             time_in_force=o["f"],
 
-            orig_qty=Decimal(o["q"]),
-            cum_filled_qty=Decimal(o["z"]),
-            avg_price=Decimal(o["ap"]),
+            orig_qty=o["q"],
+            cum_filled_qty=o["z"],
+            avg_price=o["ap"],
 
-            last_qty=Decimal(o["l"]),
-            last_price=Decimal(o["L"]),
-            commission=Decimal(o["n"]),
+            last_qty=o["l"],
+            last_price=o["L"],
+            commission=o["n"],
 
-            realized_pnl=Decimal(o["rp"]),
+            realized_pnl=o["rp"],
             is_maker=o["m"],
 
             event_time_ms=raw["E"],
             trade_time_ms=o["T"],
 
-            stop_price=Decimal(o["sp"]),
-            activation_price=Decimal(o.get("AP", "0")),
-            callback_rate=Decimal(o.get("cr", "0")),
+            stop_price=o["sp"],
+            activation_price=o.get("AP", "0"),
+            callback_rate=o.get("cr", "0"),
         )
         return d
 
@@ -102,28 +102,28 @@ class OrderEventUpdate:
             order_type=d["order_type"],
             time_in_force=d["time_in_force"],
 
-            orig_qty=Decimal(d["orig_qty"]),
-            cum_filled_qty=Decimal(d["cum_filled_qty"]),
-            avg_price=Decimal(d["avg_price"]),
+            orig_qty=d["orig_qty"],
+            cum_filled_qty=d["cum_filled_qty"],
+            avg_price=d["avg_price"],
 
-            last_qty=Decimal(d["last_qty"]),
-            last_price=Decimal(d["last_price"]),
-            commission=Decimal(d["commission"]),
+            last_qty=d["last_qty"],
+            last_price=d["last_price"],
+            commission=d["commission"],
 
-            realized_pnl=Decimal(d["realized_pnl"]),
+            realized_pnl=d["realized_pnl"],
             is_maker=bool(d["is_maker"]),
 
             event_time_ms=int(d["event_time_ms"]),
             trade_time_ms=int(d["trade_time_ms"]),
 
-            stop_price=Decimal(d["stop_price"]),
-            activation_price=Decimal(d["activation_price"]),
-            callback_rate=Decimal(d["callback_rate"]),
+            stop_price=d["stop_price"],
+            activation_price=d["activation_price"],
+            callback_rate=d["callback_rate"],
         )
 
-    def to_dict(self):
-        return to_clean_dict(self)
-
+#     def to_dict(self):
+#         return to_clean_dict(self)
+    
 # ---------- helper -----------------------------------------------------------
 def _millis_to_dt(ms: int) -> datetime:
     return datetime.fromtimestamp(timestamp=ms / 1_000.0, tz=SGT)

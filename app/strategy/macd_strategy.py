@@ -8,6 +8,8 @@ from app.utils.config import settings
 from app.utils.logger import setup_logger
 from typing import Callable, List
 from app.utils.logger import main_logger
+from app.common.interface_book import KlineEvent
+
 
 macd_logger = setup_logger(
             logger_name="macd",
@@ -77,7 +79,7 @@ class MACDStrategy(BaseStrategy):
         # this is to initialise the last action so it won't instantly ask me to buy or sell in the first ticket
         self.generate_signal()
 
-    def update_data(self, last_candle: dict):
+    def update_data(self, last_candle: KlineEvent):
         """
         Update the strategy with the latest data.
         This function appends the latest close price and recalculates the MACD and Signal Line.
@@ -86,11 +88,11 @@ class MACDStrategy(BaseStrategy):
             return
 
         previous_data = self.data.iloc[-1]
-        if previous_data['timestamp'] == last_candle['start_time']:
+        if previous_data['timestamp'] == last_candle.timestamp:
             macd_logger.info('[updateData] already added, will not add')
             return
 
-        new_data = pd.DataFrame({'timestamp': [last_candle['start_time']], 'close': [last_candle['close']]})
+        new_data = pd.DataFrame({'timestamp': [last_candle.start_time], 'close': [last_candle.close]})
         self.data = pd.concat([self.data, new_data], ignore_index=True)
 
         new_close = last_candle['close']
@@ -128,9 +130,7 @@ class MACDStrategy(BaseStrategy):
 
         signal = self.generate_signal()
         print(f"Signal Generated: {signal}")
-        for callback in self._callbacks:
-            callback(signal)
-
+        self.publish_signal(self.symbol, signal)
 
     def generate_signal(self) -> int:
         """
@@ -165,3 +165,6 @@ class MACDStrategy(BaseStrategy):
 
     def print_state(self):
         macd_logger.info(f"[State] {self.get_state()}")
+
+    def start(self) : 
+        super().start()
