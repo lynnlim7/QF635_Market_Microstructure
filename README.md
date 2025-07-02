@@ -1,90 +1,103 @@
-# QF635_Market_Microstructure
-# 🤖 Trading Bot 
+# QF635 - Market Microstructure Trading Bot 🤖
 
-## 📈 Trading Strategy Implemented in this Project: 
+This repository is part of the coursework for **QF635 - Market Microstructure**.
 
+We build an automated **trading bot** that operates based on MACD signals, using real-time data and modular system components.
 
-## ✨ Getting Started 
-# Steps to run project locally 
-- Using `pip`
-1. Set up Python virtual environment 
+---
+
+## 📦 Requirements
+
+To run this project, you'll need to have [Docker](https://docs.docker.com/get-docker/) installed.
+
+It uses the following components (started via docker) :
+
+1. Redis
+2. PostgresSQL (database)
+3. Main program
+
+---
+
+## ▶️ How to Run
+
+Create a `.env` file using `.env.example` as template.
+
+Start the trading bot with:
+
 ```bash
-# Create a virtual environment in the current directory
-python3 -m venv .venv
-
-# Activate the virtual environment
-# On macOS/Linux:
-source .venv/bin/activate
-
-# On Windows (CMD):
-.venv\Scripts\activate
+docker-compose up trading-bot
 ```
 
-2. Install project dependencies
+To shut down the services:
+
 ```bash
-pip install -r requirements.txt
+docker-compose down
 ```
 
-- Using `poetry`
-1. Install poetry using pipx
-```bash
-# Install pipx
-python3 -m pip install --user pipx
-python3 -m pipx ensurepath
+---
 
-# Install poetry using pipx 
-pipx install poetry
-poetry self add poetry-plugin-export 
-```
+## 📈 Strategy Overview: MACD-Based Trading
 
-2. Install project dependencies and activate virtual environment
-```bash
-cd QF635_Market_Microstructure
-poetry install
-poetry shell
+We use the **MACD (Moving Average Convergence Divergence)** indicator to decide when to buy or sell based on momentum shifts.
 
-# Add packages 
-poetry add <package_name>
-# Freeze
-poetry export --without-hashes --format=requirements.txt > requirements.txt
-```
+### Initialization
 
-3. Run project 
-```bash
-python bot/main.py  # or actual entry point
-```
+- The bot fetches the last 200 1-minute candles.
+- Calculates:
+  - Fast EMA (e.g., 12-period)
+  - Slow EMA (e.g., 26-period)
+  - MACD line: `EMA_FAST - EMA_SLOW`
+  - Signal line: EMA of MACD (e.g., 9-period)
+- These indicators are stored in a DataFrame.
 
-4. Run tests 
-```bash
-pytest
-```
+### Update Loop
 
-# Section Yohanes (Temporary)
+- Each closed 1-minute candle is used to:
+  - Recalculate Fast EMA, Slow EMA, MACD
+  - Update Signal Line incrementally
+- If MACD crosses above Signal Line → **Buy Signal**
+- If MACD crosses below Signal Line → **Sell Signal**
 
-## Data Gateway
+---
 
-This will spin up a data gateway, data can be extracted from redis at port 6379 with key `spot:<subscribition_channel>` e.g. (`spot:btcusdt@aggTrade`). Some data is real-time but expected refresh rate around 10ms.
+## 🧩 System Architecture
 
-How-to :
+We have the following components : 
+- Binance API/Data Gateway
+- Portfolio Manager
+- Risk Manager
+- Order Management System
 
-1. Up redis
-```docker-compose up redis -d
-``` 
+Diagram :
+![Overall Architecture](assets/architecture.png)
 
-2. Up data-gateway
-```docker-compose up data-gateway -d
-```
+## Risk Management
 
-Env setup follow `.env.example` but please change to `.env`
+For our risk management, we go with the following approaches :
 
-## Portfolio Manager (WIP)
+- Continously assess maximum downside risk of the portfolio every 30s
+- Monitor trailing down, and triggers emergency liquidation when drawdown is breached
 
-# Testing of Functions on Binance Testnet 
-https://www.binance.com/en/support/faq/detail/ab78f9a1b8824cf0a106b4229c76496d 
+Diagram: 
+![Risk Manager](assets/risk_manager.png)
 
-python-binance documentation
-https://python-binance.readthedocs.io/en/latest/
+# Backtesting 
 
+We implement event-driven backtesting which mimics market replay (using historical Kline-Events)
 
-## License 
-This project is intended for educational and research purposes only. 
+Diagram: 
+![Backtesting](assets/backtesting.png)
+
+---
+
+## 📚 Notes
+
+- Uses Binance testnet for data access (via API gateway).
+- Logs events such as signal generation, data updates, and strategy state.
+- All computation is handled using `pandas`.
+
+---
+
+## 🔒 Disclaimer
+
+This project is for academic purposes only. Not intended for actual trading or financial use.
