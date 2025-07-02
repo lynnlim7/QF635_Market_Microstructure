@@ -125,6 +125,8 @@ asyncpg = "^0.30.0"
 psycopg2 = "^2.9.10"
 alembic = "^1.16.2"
 psycopg2-binary = "^2.9.10"
+backtesting = "^0.6.4"
+backtrader = "^1.9.78.123"
 
 [build-system]
 requires = ["poetry-core"]
