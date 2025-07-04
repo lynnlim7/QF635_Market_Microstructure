@@ -6,13 +6,6 @@ from app.services.circuit_breaker import RedisCircuitBreaker
 from app.utils.config import settings
 from app.utils.logger import main_logger as logger
 
-
-#TODO: explain thought process on take profit/ stop loss - should we sell everything? or pause trading
-#TODO: listen to depth order book and take the mid price from best bid and ask
-#TODO : dynamic take profit and stop loss - adjust take profit and stop loss pct based on market vol (multiples of ATR)
-#TODO : handle market order (default) and limit order (fill up price)
-#TODO : call binance to creater order if receive buy signal - how much to buy?
-
 class RiskManager:
     def __init__(self,
                  symbol: str,
@@ -53,8 +46,6 @@ class RiskManager:
 
         timestamp = pd.to_datetime(data.get("timestamp", None), unit='ms')
         symbol = data.get('contract_name', self.symbol).upper()
-        # logger.info(f"Processing orderbook for symbol: {symbol}")
-
 
         bids = data.get('bids', [])
         asks = data.get('asks', [])
@@ -76,13 +67,10 @@ class RiskManager:
             
         if symbol not in self.df_orderbook:
             self.df_orderbook[symbol] = row
-            # logger.info(f"Created new orderbook entry for symbol: {symbol}")
         else:
             self.df_orderbook[symbol] = pd.concat([self.df_orderbook[symbol], row]).tail(500)
-            # logger.info(f"Updated orderbook for symbol: {symbol}")
 
         self.calculate_position_size()
-        # self.manage_position(symbol)
 
     def on_new_candlestick(self, data):
         logger.info("Processing new candlestick data.")
@@ -142,7 +130,6 @@ class RiskManager:
             self.current_atr = None
 
     # dynamic position size
-    # should be based on current existing positions - net positions?
     def calculate_position_size(self) -> float:
 
         if self.current_atr is None or self.current_atr <= 0:
@@ -160,8 +147,6 @@ class RiskManager:
 
             risk_amount = entry_price * self.max_risk_per_trade_pct
             position_size = (risk_amount / self.current_atr)/1000
-            # logger.info(f"Calculated position size: {position_size:.4f} with entry price: {entry_price:.4f} and ATR: {self.current_atr:.4f}")
-            # # TODO: CHECK WHY SO BIG?
             self.current_position_size = position_size
             return position_size
 
@@ -216,11 +201,9 @@ class RiskManager:
         self.accept_signal(signal, symbol)
         direction = self.trade_directions(signal)
 
-        # symbol = symbol.upper()
 
         ## from portfolio manager
         portfolio_stats = self.portfolio_manager.get_portfolio_stats_by_symbol(symbol)
-        print(f"Portfolio stats: {portfolio_stats}!!!!!!!!!!!!!!!!")
 
         position = portfolio_stats.get('position')
         current_position_size = round(position.get('qty', 0.0) if position else 0.0, 8)
@@ -243,7 +226,6 @@ class RiskManager:
         # result from manage position (tp/sl)
         result = self.manage_position(symbol)
 
-        # TODO: think of how to handle this
         # set threshold to deal with error in case of extremely small position size
         position_size_threshold = 1e-10
 
@@ -367,7 +349,6 @@ class RiskManager:
 
         current_atr = float(self.current_atr)
 
-        # TODO: think of how to handle this
         # set threshold to deal with error in case of extremely small position size
         position_size_threshold = 1e-10
 

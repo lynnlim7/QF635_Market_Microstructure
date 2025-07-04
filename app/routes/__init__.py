@@ -4,9 +4,6 @@ from app.api.binance_api import BinanceApi
 from app.common.interface_order import Side
 from app.portfolio.portfolio_manager import PortfolioManager
 
-
-#TODO : implement kill switch route
-
 def register_routes(app, binance_api:BinanceApi, portfolio_manager: PortfolioManager):
     @app.get("/")
     def home():
