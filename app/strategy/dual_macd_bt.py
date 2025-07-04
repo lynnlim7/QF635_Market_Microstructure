@@ -13,127 +13,93 @@ def compute_MACD(close, fast, slow, signal):
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     return macd.values, signal_line.values
 
-   
 
-class BacktestingRiskManager:
-    def __init__(self, strategy, max_risk_per_trade_pct=0.01, max_exposure_pct=0.05):
-        self.strategy = strategy
-        self.max_risk_per_trade_pct = max_risk_per_trade_pct
-        self.max_exposure_pct = max_exposure_pct
-        
-        # Track portfolio state
-        self.initial_capital = 100000
-        self.peak_value = 100000
-        self.current_exposure = 0
-        
-    def calculate_atr(self, high, low, close, period=14):
-        """Vectorized ATR calculation"""
-        prev_close = pd.Series(close).shift(1)
-        tr1 = high - low
-        tr2 = abs(high - prev_close)
-        tr3 = abs(low - prev_close)
-        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        return true_range.rolling(window=period, min_periods=1).mean()
-    
-    def calculate_position_size(self, entry_price, atr_value):
-        """Calculate position size based on ATR"""
-        if atr_value <= 0:
-            return 0
-            
-        risk_amount = entry_price * self.max_risk_per_trade_pct
-        position_size = (risk_amount / atr_value) / 1000
-        return max(position_size, 0)
-    
-    def check_exposure_limit(self, position_size, current_price):
-        """Check if position exceeds exposure limit"""
-        position_value = abs(position_size * current_price)
-        portfolio_value = self.strategy.equity
-        max_exposure = portfolio_value * self.max_exposure_pct
-        
-        return position_value <= max_exposure
-    
-    def calculate_tp_sl(self, entry_price, atr_value, position_size, atr_multiplier=1.0):
-        """Calculate take profit and stop loss levels"""
-        if atr_value <= 0:
-            return None, None
-            
-        risk = atr_value * atr_multiplier
-        
-        if position_size > 0:  # Long position
-            stop_loss = entry_price - risk
-            take_profit = entry_price + (2 * risk)
-        else:  # Short position
-            stop_loss = entry_price + risk
-            take_profit = entry_price - (2 * risk)
-            
-        return take_profit, stop_loss
-    
-    def check_drawdown_limit(self, current_equity):
-        """Check drawdown limits"""
-        self.peak_value = max(self.peak_value, current_equity)
-        drawdown = (self.peak_value - current_equity) / self.peak_value
-        
-        # Emergency shutdown if drawdown > 10%
-        if drawdown > 0.10:
-            return True
-        return False
+def compute_MACD(close, fast, slow, signal):
+    """Compute MACD with standard EMA calculation"""
+    close_price = pd.Series(close)
+    ema_fast = close_price.ewm(span=fast, adjust=False).mean()
+    ema_slow = close_price.ewm(span=slow, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    return macd.values, signal_line.values
 
-class DualMACD(Strategy):
-    # fast MACD (3,10,16)
+class DualMACDStrategy(Strategy):
+    # MACD parameters
+    # Fast MACD (3,10,16)
     fast_period_1 = 3
     slow_period_1 = 10
     signal_1 = 16
-    # slow MACD (12,26,9)
+    # Slow MACD (12,26,9)
     fast_period_2 = 12
     slow_period_2 = 26
     signal_2 = 9
 
     def init(self):
         close = self.data.Close
+        
+        # Fast MACD
+        self.fast_macd, self.fast_signal = self.I(compute_MACD, close, 
+                                                 self.fast_period_1, self.slow_period_1, self.signal_1)
+        
+        # Slow MACD
+        self.slow_macd, self.slow_signal = self.I(compute_MACD, close, 
+                                                 self.fast_period_2, self.slow_period_2, self.signal_2)
 
-        self.fast_macd, self.fast_signal = self.I(compute_MACD, close, self.fast_period_1, self.slow_period_1, self.signal_1)
-        self.slow_macd, self.slow_signal = self.I(compute_MACD, close, self.fast_period_2, self.slow_period_2, self.signal_2)
+        self.latest_fast_macd = None
+        self.latest_fast_signal = None
+        self.latest_slow_macd = None
+        self.latest_slow_signal = None
+        self.last_action = None
 
-        self.atr = self.I(self.calculate_atr_vectorized, self.data.High, self.data.Low, self.data.Close)
+        if len(self.fast_macd) > 0:
+            self.latest_fast_macd = self.fast_macd[0]
+            self.latest_fast_signal = self.fast_signal[0]
+            self.latest_slow_macd = self.slow_macd[0]
+            self.latest_slow_signal = self.slow_signal[0]
 
-        self.risk_manager = BacktestingRiskManager(self)
-        self.entry_price = None
-        self.take_profit = None
-        self.stop_loss = None
-        self.emergency_shutdown = False
-
-    def calculate_atr_vectorized(self, high, low, close, period=14):
-        """Simplified ATR calculation"""
-        # Use numpy arrays directly
-        high_arr = np.array(high)
-        low_arr = np.array(low)
-        close_arr = np.array(close)
-        
-        # Calculate true range
-        prev_close = np.roll(close_arr, 1)
-        prev_close[0] = close_arr[0]  # Handle first element
-        
-        tr1 = high_arr - low_arr
-        tr2 = np.abs(high_arr - prev_close)
-        tr3 = np.abs(low_arr - prev_close)
-        
-        # True range is max of the three
-        true_range = np.maximum(tr1, np.maximum(tr2, tr3))
-        
-        # Calculate ATR using pandas rolling
-        atr_series = pd.Series(true_range).rolling(window=period, min_periods=1).mean()
-        
-        return atr_series.values
-        
-    
     def next(self):
-        fast_bullish = self.fast_macd[-1] > self.fast_signal[-1]
-        slow_bullish = self.slow_macd[-1] > self.slow_signal[-1]
-        fast_bearish = self.fast_macd[-1] < self.fast_signal[-1]
-        slow_bearish = self.slow_macd[-1] < self.slow_signal[-1]
-
-        if not self.position and fast_bullish and slow_bullish:
+        self.latest_fast_macd = self.fast_macd[-1]
+        self.latest_fast_signal = self.fast_signal[-1]
+        self.latest_slow_macd = self.slow_macd[-1]
+        self.latest_slow_signal = self.slow_signal[-1]
+        
+        signal = self.generate_signal()
+        
+        if signal == settings.SIGNAL_SCORE_BUY and self.position.size == 0:
             self.buy()
-
-        elif self.position and (fast_bearish or slow_bearish):
+            
+        elif signal == settings.SIGNAL_SCORE_SELL and self.position.size != 0:
             self.position.close()
+    
+    def generate_signal(self) -> int:
+        if (self.latest_fast_macd is None or self.latest_fast_signal is None or
+            self.latest_slow_macd is None or self.latest_slow_signal is None):
+            return settings.SIGNAL_SCORE_HOLD
+
+        # BUY: Both MACDs are bullish (above their signal lines)
+        fast_bullish = self.latest_fast_macd > self.latest_fast_signal
+        slow_bullish = self.latest_slow_macd > self.latest_slow_signal
+        
+        if fast_bullish and slow_bullish and self.last_action != "BUY":
+            self.last_action = "BUY"
+            return settings.SIGNAL_SCORE_BUY
+
+        # SELL: Either MACD is bearish (below its signal line)
+        fast_bearish = self.latest_fast_macd < self.latest_fast_signal
+        slow_bearish = self.latest_slow_macd < self.latest_slow_signal
+        
+        if (fast_bearish or slow_bearish) and self.last_action != "SELL":
+            self.last_action = "SELL"
+            return settings.SIGNAL_SCORE_SELL
+
+        return settings.SIGNAL_SCORE_HOLD
+    
+    def get_state(self) -> dict:
+        return {
+            "fast_macd": self.latest_fast_macd,
+            "fast_signal": self.latest_fast_signal,
+            "slow_macd": self.latest_slow_macd,
+            "slow_signal": self.latest_slow_signal,
+            "last_action": self.last_action,
+            "last_price": self.data.Close[-1]
+        }

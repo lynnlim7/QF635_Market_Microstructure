@@ -2,6 +2,7 @@ from backtesting import Strategy, Backtest
 import pandas as pd
 import numpy as np
 from app.utils.config import settings
+
 class MACDStrategyBacktest(Strategy):
     slow_period = 26
     fast_period = 12
@@ -35,7 +36,6 @@ class MACDStrategyBacktest(Strategy):
         
         signal = self.generate_signal()
         
-        # Execute trades
         if signal == settings.SIGNAL_SCORE_BUY and not self.position:
             self.buy()
             
